@@ -1,0 +1,5 @@
+# Usernames safe to remove during debug and with remove-followers-from-file in config.yml.
+# One @username per line (the @ is optional). Lines starting with # are ignored.
+# Add followers you want to practice removing (they must follow you).
+testfollower1
+testfollower2

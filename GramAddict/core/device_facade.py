@@ -119,6 +119,13 @@ class DeviceFacade:
         index=None,
         **kwargs,
     ):
+        return self.find_any(index=index, **kwargs)
+
+    def find_any(
+        self,
+        index=None,
+        **kwargs,
+    ):
         try:
             view = self.deviceV2(**kwargs)
             if index is not None and view.count > 1:
@@ -247,6 +254,38 @@ class DeviceFacade:
             while not self.is_alive() and attempts < 5:
                 self.get_info()
                 attempts += 1
+            self.disable_auto_rotate()
+
+    def reconnect(self) -> bool:
+        """Re-establish uiautomator2 after atx-agent/USB/WiFi hiccups."""
+        serial = self.device_id
+        if self.deviceV2 is not None:
+            try:
+                serial = self.deviceV2.serial or serial
+            except Exception:
+                pass
+        try:
+            logger.warning("Reconnecting to device %s...", serial)
+            if serial is None or "." not in str(serial):
+                self.deviceV2 = uiautomator2.connect(
+                    "" if serial is None else serial
+                )
+            else:
+                self.deviceV2 = uiautomator2.connect_adb_wifi(f"{serial}")
+            self.wake_up()
+            return self.is_alive()
+        except Exception as e:
+            logger.error("Device reconnect failed: %s", e)
+            return False
+
+    def disable_auto_rotate(self) -> None:
+        """Keep portrait locked — auto-rotate causes missed UI elements on feed/reels."""
+        try:
+            self.deviceV2.shell("settings put system accelerometer_rotation 0")
+            self.deviceV2.shell("settings put system user_rotation 0")
+            logger.debug("Auto-rotate disabled (portrait locked).")
+        except uiautomator2.JSONRPCError as e:
+            logger.debug(f"Could not disable auto-rotate: {e}")
 
     def unlock(self):
         self.swipe(Direction.UP, 0.8)
@@ -295,19 +334,54 @@ class DeviceFacade:
         except uiautomator2.JSONRPCError as e:
             raise DeviceFacade.JsonRpcError(e)
 
-    def swipe_points(self, sx, sy, ex, ey, random_x=True, random_y=True):
+    def swipe_points(
+        self,
+        sx,
+        sy,
+        ex,
+        ey,
+        random_x=True,
+        random_y=True,
+        duration=None,
+    ):
         if random_x:
             sx = int(sx * uniform(0.85, 1.15))
             ex = int(ex * uniform(0.85, 1.15))
         if random_y:
             ey = int(ey * uniform(0.98, 1.02))
         sy = int(sy)
+        # Slow swipes (200–500ms) on the home feed feel like a hold to Instagram
+        # (reels, carousels, etc.). Pass a shorter duration for feed flicks.
+        if duration is None:
+            duration = uniform(0.2, 0.5)
         try:
-            logger.debug(f"Swipe from: ({sx},{sy}) to ({ex},{ey}).")
-            self.deviceV2.swipe_points([[sx, sy], [ex, ey]], uniform(0.2, 0.5))
+            logger.debug(
+                f"Swipe from: ({sx},{sy}) to ({ex},{ey}), duration={duration:.3f}s."
+            )
+            self.deviceV2.swipe_points([[sx, sy], [ex, ey]], duration)
             DeviceFacade.sleep_mode(SleepTime.TINY)
         except uiautomator2.JSONRPCError as e:
             raise DeviceFacade.JsonRpcError(e)
+
+    def double_tap_screen_center(self, jitter_ratio: float = 0.08) -> tuple[int, int]:
+        """Double tap a random point near the center of the screen."""
+        info = self.get_info()
+        width = info["displayWidth"]
+        height = info["displayHeight"]
+        center_x = width / 2
+        center_y = height / 2
+        jitter_x = width * jitter_ratio
+        jitter_y = height * jitter_ratio
+        x = int(uniform(center_x - jitter_x, center_x + jitter_x))
+        y = int(uniform(center_y - jitter_y, center_y + jitter_y))
+        duration = uniform(0.050, 0.140)
+        logger.debug(f"Double tap near screen center at ({x},{y})")
+        try:
+            self.deviceV2.double_click(x, y, duration=duration)
+            DeviceFacade.sleep_mode(SleepTime.DEFAULT)
+        except uiautomator2.JSONRPCError as e:
+            raise DeviceFacade.JsonRpcError(e)
+        return x, y
 
     def get_info(self):
         # {'currentPackageName': 'net.oneplus.launcher', 'displayHeight': 1920, 'displayRotation': 0, 'displaySizeDpX': 411,
@@ -644,18 +718,22 @@ class DeviceFacade:
 
         @staticmethod
         def get_ui_timeout(ui_timeout: Timeout) -> int:
-            ui_timeout = Timeout.ZERO if ui_timeout is None else ui_timeout
-            if ui_timeout == Timeout.ZERO:
-                ui_timeout = 0
-            elif ui_timeout == Timeout.TINY:
-                ui_timeout = 1
-            elif ui_timeout == Timeout.SHORT:
-                ui_timeout = 3
-            elif ui_timeout == Timeout.MEDIUM:
-                ui_timeout = 5
-            elif ui_timeout == Timeout.LONG:
-                ui_timeout = 8
-            return ui_timeout
+            """Map Timeout enum to seconds. Uses .name so reload-safe across importlib.reload."""
+            if ui_timeout is None:
+                return 5
+            by_name = {
+                "ZERO": 0,
+                "TINY": 1,
+                "SHORT": 3,
+                "MEDIUM": 5,
+                "LONG": 8,
+            }
+            name = getattr(ui_timeout, "name", None)
+            if name in by_name:
+                return by_name[name]
+            if isinstance(ui_timeout, (int, float)):
+                return int(ui_timeout)
+            return 5
 
         def get_text(self, error=True, index=None):
             try:

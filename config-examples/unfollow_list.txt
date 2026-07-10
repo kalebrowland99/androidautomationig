@@ -1,0 +1,5 @@
+# Usernames safe to unfollow during debug and with unfollow-from-file in config.yml.
+# One @username per line (the @ is optional). Lines starting with # are ignored.
+# Add 1–2 test accounts you follow on purpose for practice.
+testaccount1
+testaccount2

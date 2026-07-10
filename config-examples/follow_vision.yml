@@ -1,0 +1,11 @@
+# Follow vision — screenshot profiles before interacting; OpenAI decides pass/fail
+enabled: false
+prompt-batch: 615FILMS
+# AI-generated comments (short, casual collab messages) instead of comments.txt
+ai-comment-enabled: false
+ai-comment-prompt: >-
+  Write one very short, casual Instagram comment aimed at a musician or artist,
+  hinting that you want to collaborate or work together soon. Keep it under 8
+  words, sound like a real person, and sometimes end with a fire emoji.
+  Return only the comment text.
+# openai-api-key: ""  # optional — falls back to post_reel.yml

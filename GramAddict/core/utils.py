@@ -186,7 +186,13 @@ def get_instagram_version():
 
 def open_instagram_with_url(url) -> bool:
     logger.info(f"Open Instagram app with url: {url}")
-    cmd = f"adb{'' if configs.device_id is None else ' -s ' + configs.device_id} shell am start -a android.intent.action.VIEW -d {url}"
+    # Append the Instagram package so Android routes the VIEW intent straight to the
+    # app instead of showing the "open with Instagram or browser" chooser.
+    package = globals().get("app_id") or "com.instagram.android"
+    cmd = (
+        f"adb{'' if configs.device_id is None else ' -s ' + configs.device_id} "
+        f"shell am start -a android.intent.action.VIEW -d {url} {package}"
+    )
     cmd_res = subprocess.run(cmd, stdout=PIPE, stderr=PIPE, shell=True, encoding="utf8")
     err = cmd_res.stderr.strip()
     random_sleep()
@@ -460,8 +466,12 @@ def _restore_keyboard(device):
 
 def random_sleep(inf=0.5, sup=3.0, modulable=True, log=True):
     MIN_INF = 0.3
-    multiplier = float(args.speed_multiplier)
-    delay = uniform(inf, sup) / (multiplier if modulable else 1.0)
+    speed_multiplier = 1.0
+    try:
+        speed_multiplier = float(args.speed_multiplier)
+    except (NameError, AttributeError):
+        pass
+    delay = uniform(inf, sup) / (speed_multiplier if modulable else 1.0)
     delay = max(delay, MIN_INF)
     if log:
         logger.debug(f"{str(delay)[:4]}s sleep")
@@ -486,9 +496,14 @@ def save_crash(device):
     hierarchy_format = ".xml"
     try:
         device.dump_hierarchy(os.path.join(crash_path, "hierarchy" + hierarchy_format))
-    except RuntimeError:
+    except (RuntimeError, requests.exceptions.ConnectionError):
         logger.error(f"Cannot save 'hierarchy.{hierarchy_format}'.")
-    if args.screen_record:
+    screen_record = False
+    try:
+        screen_record = bool(args.screen_record)
+    except (NameError, AttributeError):
+        pass
+    if screen_record:
         try:
             device.stop_screenrecord(crash=True)
         except Exception as e:
@@ -500,10 +515,13 @@ def save_crash(device):
             os.replace(files[-1], os.path.join(crash_path, "video.mp4"))
         except (FileNotFoundError, IndexError):
             logger.error("File *.mp4 not found!")
-    g_log_file_name, g_logs_dir, _, _ = get_log_file_config()
-    src_file = os.path.join(g_logs_dir, g_log_file_name)
-    target_file = os.path.join(crash_path, "logs.txt")
-    trim_txt(source=src_file, target=target_file)  # copy logs trimmed
+    try:
+        g_log_file_name, g_logs_dir, _, _ = get_log_file_config()
+        src_file = os.path.join(g_logs_dir, g_log_file_name)
+        target_file = os.path.join(crash_path, "logs.txt")
+        trim_txt(source=src_file, target=target_file)  # copy logs trimmed
+    except (NameError, TypeError, OSError):
+        pass
     shutil.make_archive(crash_path, "zip", crash_path)
     shutil.rmtree(crash_path)
     logger.info(
@@ -516,13 +534,16 @@ def save_crash(device):
     )
     logger.info("https://discord.gg/66zWWCDM7x\n", extra={"color": Fore.GREEN})
     check_if_updated(crash=True)
-    if args.screen_record:
-        try:
-            device.start_screenrecord()
-        except Exception as e:
-            logger.error(
-                f"You can't use this feature without installing dependencies. Type that in console: 'pip3 install -U \"uiautomator2[image]\" -i https://pypi.doubanio.com/simple'. Exception: {e}"
-            )
+    try:
+        if args.screen_record:
+            try:
+                device.start_screenrecord()
+            except Exception as e:
+                logger.error(
+                    f"You can't use this feature without installing dependencies. Type that in console: 'pip3 install -U \"uiautomator2[image]\" -i https://pypi.doubanio.com/simple'. Exception: {e}"
+                )
+    except (NameError, AttributeError):
+        pass
 
 
 def trim_txt(source: str, target: str) -> None:

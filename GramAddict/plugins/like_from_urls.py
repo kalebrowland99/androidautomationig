@@ -87,12 +87,10 @@ class LikeFromURLs(Plugin):
                         if already_liked:
                             logger.info("Post already liked!")
                         else:
-                            _, content_desc = post_view_list._get_media_container()
-
-                            (
-                                media_type,
-                                obj_count,
-                            ) = post_view_list.detect_media_type(content_desc)
+                            media_type, obj_count = post_view_list.get_media_type_and_count()
+                            if media_type is None:
+                                logger.warning("Could not detect media type for URL post.")
+                                continue
                             if media_type in (
                                 MediaType.REEL,
                                 MediaType.IGTV,

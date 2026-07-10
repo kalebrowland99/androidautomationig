@@ -1,0 +1,7 @@
+# Reel posting — posts per session, OpenAI key, prompt batch
+# Reels queue — posts 1 reel per session, rotating through post_media/ videos
+posts-per-session: 1
+prompt-batch: 615FILMS
+openai-api-key: ""
+openai-model: gpt-4o
+clear-gallery-before-each: true

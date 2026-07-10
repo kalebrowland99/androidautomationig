@@ -1,0 +1,5 @@
+posts-per-session: 1
+prompt-batch: 615FILMS
+openai-api-key: ""
+openai-model: gpt-4o
+clear-gallery-before-each: true

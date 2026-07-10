@@ -1,0 +1,13 @@
+name: engage with previous client's likes
+source_account: laurenpk.222
+created_at: '2026-07-08T04:30:36Z'
+files:
+- config.yml
+- filters.yml
+- telegram.yml
+- post_reel.yml
+- post_reel_prompts.yml
+- follow_vision.yml
+- follow_vision_prompts.yml
+- comments_list.txt
+- pm_list.txt

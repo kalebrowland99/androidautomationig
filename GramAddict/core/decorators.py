@@ -6,6 +6,7 @@ from http.client import HTTPException
 from socket import timeout
 
 from colorama import Fore, Style
+from requests.exceptions import ConnectionError as RequestsConnectionError
 from uiautomator2.exceptions import UiObjectNotFoundError
 
 from GramAddict.core.device_facade import DeviceFacade
@@ -76,6 +77,7 @@ def run_safely(device, device_id, sessions, session_state, screen_record, config
                 HTTPException,
                 timeout,
                 UiObjectNotFoundError,
+                RequestsConnectionError,
             ):
                 restart(
                     device,
@@ -90,10 +92,16 @@ def run_safely(device, device_id, sessions, session_state, screen_record, config
                     logger.critical(
                         f"'{exception_line}' -> This kind of exception will stop the bot (no restart)."
                     )
-                logger.info(
-                    f"List of running apps: {', '.join(device.deviceV2.app_list_running())}"
-                )
-                save_crash(device)
+                try:
+                    logger.info(
+                        f"List of running apps: {', '.join(device.deviceV2.app_list_running())}"
+                    )
+                except RequestsConnectionError:
+                    device.reconnect()
+                try:
+                    save_crash(device)
+                except RequestsConnectionError:
+                    logger.warning("Could not save crash dump — device disconnected.")
                 close_instagram(device)
                 print_full_report(sessions, configs.args.scrape_to_file)
                 sessions.persist(directory=session_state.my_username)
@@ -112,9 +120,14 @@ def restart(
     normal_crash: bool = True,
     print_traceback: bool = True,
 ):
+    if not device.is_alive():
+        device.reconnect()
     if print_traceback:
         logger.error(traceback.format_exc())
-        save_crash(device)
+        try:
+            save_crash(device)
+        except RequestsConnectionError:
+            logger.warning("Could not save crash dump — device disconnected.")
     logger.info(
         f"List of running apps: {', '.join(device.deviceV2.app_list_running())}."
     )

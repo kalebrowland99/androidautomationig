@@ -408,4 +408,16 @@ class CoreArguments(Plugin):
                 "help": "don't ask the user to press enter to continue with an untested IG version",
                 "action": "store_true",
             },
+            {
+                "arg": "--ensure-vpn",
+                "help": "turn on VPN via Shadowrocket before opening Instagram",
+                "action": "store_true",
+            },
+            {
+                "arg": "--vpn-app-name",
+                "nargs": None,
+                "help": "home-screen label of the VPN app to open",
+                "metavar": "Shadowrocket",
+                "default": "Shadowrocket",
+            },
         ]

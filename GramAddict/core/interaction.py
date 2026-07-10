@@ -34,6 +34,7 @@ from GramAddict.core.views import (
     CurrentStoryView,
     Direction,
     MediaType,
+    OpenedPostView,
     PostsGridView,
     ProfileView,
     UniversalActions,
@@ -41,6 +42,8 @@ from GramAddict.core.views import (
 )
 
 logger = logging.getLogger(__name__)
+
+ResourceID = None
 
 
 def load_config(config):
@@ -50,6 +53,96 @@ def load_config(config):
     args = config.args
     configs = config
     ResourceID = resources(config.args.app_id)
+
+
+def find_comment_thread_edittext(device: DeviceFacade):
+    """Comment compose — layout_comment_thread_edittext_multiline inside edittext_container."""
+    global ResourceID
+    if ResourceID is None:
+        from GramAddict.core import views as ga_views
+
+        ResourceID = getattr(ga_views, "ResourceID", None) or resources(
+            getattr(getattr(ga_views, "args", None), "app_id", "com.instagram.android")
+        )
+    rid = ResourceID
+
+    for enabled in (None, "false", "true"):
+        opts: dict = {"resourceIdMatches": rid.LAYOUT_COMMENT_THREAD_EDITTEXT}
+        if enabled is not None:
+            opts["enabled"] = enabled
+        box = device.find(**opts)
+        if box.exists(Timeout.SHORT):
+            return box
+
+    container = device.find(resourceId=rid.EDITTEXT_CONTAINER)
+    if not container.exists(Timeout.SHORT):
+        container = device.find(resourceIdMatches=rid.LAYOUT_COMMENT_THREAD_EDITTEXT)
+    if container.exists(Timeout.SHORT):
+        for child_rid in (
+            rid.LAYOUT_COMMENT_THREAD_EDITTEXT_MULTILINE,
+            rid.LAYOUT_COMMENT_THREAD_EDITTEXT,
+        ):
+            edit = container.child(resourceId=child_rid)
+            if edit.exists(Timeout.SHORT):
+                return edit
+        edit = container.child(className=ClassName.EDIT_TEXT)
+        if edit.exists(Timeout.SHORT):
+            return edit
+
+    for enabled in (None, "false", "true"):
+        opts = {
+            "resourceIdMatches": rid.LAYOUT_COMMENT_THREAD_EDITTEXT,
+            "className": ClassName.EDIT_TEXT,
+        }
+        if enabled is not None:
+            opts["enabled"] = enabled
+        box = device.find(**opts)
+        if box.exists(Timeout.SHORT):
+            return box
+
+    return container
+
+
+def find_post_comment_button(device: DeviceFacade):
+    """Feed post comment row or fullscreen reels UFI comment button."""
+    return OpenedPostView(device).find_comment_button()
+
+
+def _confirm_comment_posted(
+    device: DeviceFacade, my_username: str, comment: str
+) -> bool:
+    """Confirm a comment was posted (comment thread or inline on profile Posts view)."""
+    username = my_username.lstrip("@")
+    needle = comment.strip()
+    snippet = needle[: min(len(needle), 40)]
+
+    posted_text = device.find(text=f"{username} {needle}")
+    if posted_text.exists(Timeout.SHORT):
+        when_posted = posted_text.sibling(
+            resourceId=ResourceID.ROW_COMMENT_SUB_ITEMS_BAR
+        ).child(resourceId=ResourceID.ROW_COMMENT_TEXTVIEW_TIME_AGO)
+        if when_posted.exists(Timeout.SHORT):
+            return True
+
+    for selector in (
+        {"text": f"{username} {needle}"},
+        {"textContains": f"{username} {snippet}"},
+        {"textContains": snippet},
+    ):
+        if device.find(**selector).exists(Timeout.SHORT):
+            return True
+
+    posted = device.find(
+        resourceId=ResourceID.ROW_COMMENT_TEXTVIEW_COMMENT,
+        textContains=snippet,
+    )
+    if posted.exists(Timeout.SHORT):
+        return True
+
+    return device.find(
+        resourceIdMatches=ResourceID.ROW_FEED_COMMENT_TEXTVIEW_LAYOUT,
+        textContains=snippet,
+    ).exists(Timeout.SHORT)
 
 
 def interact_with_user(
@@ -109,6 +202,22 @@ def interact_with_user(
     profile_view = ProfileView(device)
     delta = format(time() - start_time, ".2f")
     logger.debug(f"Profile checked in {delta}s")
+
+    if can_follow and scraping_file is None:
+        from GramAddict.core.follow_vision_account import profile_passes_follow_vision
+
+        if not profile_passes_follow_vision(device, username, my_username):
+            return (
+                interacted,
+                followed,
+                profile_data.is_private,
+                scraped,
+                sent_pm,
+                number_of_liked,
+                number_of_watched,
+                number_of_commented,
+            )
+
     if profile_data.is_private or (profile_data.posts_count == 0):
         private_empty = "Private" if profile_data.is_private else "Empty"
         logger.info(f"{private_empty} account.")
@@ -281,12 +390,32 @@ def interact_with_user(
             elif opened_post_view and already_liked is not None:
                 if media_type in (MediaType.REEL, MediaType.IGTV, MediaType.VIDEO):
                     opened_post_view.start_video()
-                    video_opened = opened_post_view.open_video()
-                    if video_opened:
-                        opened_post_view.watch_media(media_type)
+                    opened_post_view.open_video()
+                    in_fullscreen, _ = opened_post_view._is_video_in_fullscreen()
+                    opened_post_view.watch_media(media_type)
+                    if in_fullscreen:
                         like_succeed = opened_post_view.like_video()
-                        logger.debug("Closing video...")
-                        device.back()
+                        stay_for_comment = (
+                            comment_percentage != 0
+                            and can_comment_job
+                            and number_of_commented
+                            < max_comments_pro_user
+                            and can_comment(
+                                media_type, profile_filter, current_mode
+                            )
+                        )
+                        if not stay_for_comment:
+                            logger.debug("Closing video...")
+                            device.back()
+                        else:
+                            logger.debug(
+                                "Staying in reel view to comment after like."
+                            )
+                    else:
+                        logger.debug(
+                            "Inline profile/feed video — liking on post view."
+                        )
+                        like_succeed = opened_post_view.like_post()
                 elif media_type in (MediaType.CAROUSEL, MediaType.PHOTO):
                     if media_type == MediaType.CAROUSEL:
                         _browse_carousel(device, obj_count)
@@ -600,32 +729,35 @@ def _comment(
         if not random_choice(comment_percentage):
             return False
         universal_actions = UniversalActions(device)
-        # we have to do a little swipe for preventing get the previous post comments button (which is covered by top bar, but present in hierarchy!!)
-        universal_actions._swipe_points(
-            direction=Direction.DOWN, delta_y=randint(150, 250)
-        )
-        tab_bar = device.find(
-            resourceId=ResourceID.TAB_BAR,
-        )
-        media = device.find(
-            resourceIdMatches=ResourceID.MEDIA_CONTAINER,
-        )
-        if int(tab_bar.get_bounds()["top"]) - int(media.get_bounds()["bottom"]) < 150:
+        opened_post_view = OpenedPostView(device)
+        in_fullscreen, fullscreen_media = opened_post_view._is_video_in_fullscreen()
+        if not in_fullscreen:
+            # we have to do a little swipe for preventing get the previous post comments button (which is covered by top bar, but present in hierarchy!!)
             universal_actions._swipe_points(
                 direction=Direction.DOWN, delta_y=randint(150, 250)
             )
+            tab_bar = device.find(
+                resourceId=ResourceID.TAB_BAR,
+            )
+            media = device.find(
+                resourceIdMatches=ResourceID.MEDIA_CONTAINER,
+            )
+            if (
+                tab_bar.exists()
+                and media.exists()
+                and int(tab_bar.get_bounds()["top"]) - int(media.get_bounds()["bottom"])
+                < 150
+            ):
+                universal_actions._swipe_points(
+                    direction=Direction.DOWN, delta_y=randint(150, 250)
+                )
         # look at hashtag of comment
         for _ in range(2):
-            comment_button = device.find(
-                resourceId=ResourceID.ROW_FEED_BUTTON_COMMENT,
-            )
+            comment_button = opened_post_view.find_comment_button()
             if comment_button.exists():
                 logger.info("Open comments of post.")
                 comment_button.click()
-                comment_box = device.find(
-                    resourceId=ResourceID.LAYOUT_COMMENT_THREAD_EDITTEXT,
-                    enabled="true",
-                )
+                comment_box = find_comment_thread_edittext(device)
                 if comment_box.exists():
                     comment = load_random_comment(my_username, media_type)
                     if comment is None:
@@ -640,7 +772,7 @@ def _comment(
                     )
 
                     post_button = device.find(
-                        resourceId=ResourceID.LAYOUT_COMMENT_THREAD_POST_BUTTON_CLICK_AREA
+                        resourceId=ResourceID.LAYOUT_COMMENT_THREAD_POST_BUTTON_ICON
                     )
                     post_button.click()
                 else:
@@ -651,35 +783,33 @@ def _comment(
 
                 universal_actions.detect_block(device)
                 universal_actions.close_keyboard(device)
-                posted_text = device.find(
-                    text=f"{my_username} {comment}",
+                comment_confirmed = _confirm_comment_posted(
+                    device, my_username, comment
                 )
-                when_posted = posted_text.sibling(
-                    resourceId=ResourceID.ROW_COMMENT_SUB_ITEMS_BAR
-                ).child(resourceId=ResourceID.ROW_COMMENT_TEXTVIEW_TIME_AGO)
-                if posted_text.exists(Timeout.MEDIUM) and when_posted.exists(
-                    Timeout.MEDIUM
-                ):
+                if comment_confirmed:
                     logger.info("Comment succeed.", extra={"color": f"{Fore.GREEN}"})
                     session_state.totalComments += 1
-                    comment_confirmed = True
                 else:
                     logger.warning("Failed to check if comment succeed.")
-                    comment_confirmed = False
 
                 logger.info("Go back to post view.")
                 device.back()
                 return comment_confirmed
-            else:
-                like_button = device.find(
-                    resourceId=ResourceID.ROW_FEED_BUTTON_LIKE,
-                )
-                if like_button.exists():
-                    logger.info("This post has comments disabled.")
-                    return False
-                universal_actions._swipe_points(
-                    direction=Direction.DOWN, delta_y=randint(150, 250)
-                )
+            if in_fullscreen:
+                if fullscreen_media.exists():
+                    logger.debug("Revealing reel sidebar to find comment button...")
+                    fullscreen_media.click()
+                    random_sleep(0.3, 0.6, modulable=False, log=False)
+                continue
+            like_button = device.find(
+                resourceId=ResourceID.ROW_FEED_BUTTON_LIKE,
+            )
+            if like_button.exists():
+                logger.info("This post has comments disabled.")
+                return False
+            universal_actions._swipe_points(
+                direction=Direction.DOWN, delta_y=randint(150, 250)
+            )
     return False
 
 
@@ -746,7 +876,7 @@ def _send_PM(
         )
         message_box.set_text(message, Mode.PASTE if args.dont_type else Mode.TYPE)
         send_button = device.find(
-            resourceId=ResourceID.ROW_THREAD_COMPOSER_BUTTON_SEND,
+            resourceIdMatches=ResourceID.ROW_THREAD_COMPOSER_BUTTON_SEND,
         )
         if send_button.exists():
             send_button.click()
@@ -819,6 +949,20 @@ def load_random_message(my_username: str) -> Optional[str]:
 
 
 def load_random_comment(my_username: str, media_type: MediaType) -> Optional[str]:
+    try:
+        from GramAddict.core.follow_vision_account import (
+            ai_comments_enabled,
+            generate_ai_comment,
+        )
+
+        if ai_comments_enabled(my_username):
+            comment = generate_ai_comment(my_username)
+            if comment:
+                return emoji.emojize(comment, use_aliases=True)
+    except Exception as exc:
+        logger.warning(
+            f"AI comment generation failed ({exc}); falling back to comments file."
+        )
     lines = _load_and_clean_txt_file(my_username, storage.FILENAME_COMMENTS)
     if lines is None:
         return None

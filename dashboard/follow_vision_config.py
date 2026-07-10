@@ -1,0 +1,89 @@
+"""Dashboard wrappers for follow vision account files."""
+
+from __future__ import annotations
+
+from typing import Any
+
+from dashboard.gramaddict_config import ACCOUNTS_DIR, _save_yaml
+from GramAddict.core import follow_vision_account as fva
+
+FOLLOW_VISION_FIELDS: list[dict[str, Any]] = [
+    {
+        "key": "enabled",
+        "label": "Enable follow vision filter",
+        "type": "bool",
+        "default": False,
+    },
+    {
+        "key": "prompt-batch",
+        "label": "Vision prompt batch",
+        "type": "select",
+        "options": ["615FILMS", "YourLoveFilms"],
+        "default": "615FILMS",
+    },
+    {
+        "key": "ai-comment-enabled",
+        "label": "AI-generated comments",
+        "type": "bool",
+        "default": False,
+    },
+    {
+        "key": "ai-comment-prompt",
+        "label": "AI comment prompt",
+        "type": "textarea",
+        "default": fva.DEFAULT_COMMENT_PROMPT,
+    },
+]
+
+FOLLOW_VISION_HELP: dict[str, str] = {
+    "enabled": (
+        "Before interacting with a profile, screenshot it and ask OpenAI Vision "
+        "whether it matches your prompt. Profiles that fail are skipped."
+    ),
+    "prompt-batch": "Which vision prompt to use — 615FILMS (musicians) or YourLoveFilms (couples).",
+    "ai-comment-enabled": (
+        "When commenting is enabled, generate each comment with OpenAI instead of "
+        "picking from comments.txt. Uses the prompt below."
+    ),
+    "ai-comment-prompt": (
+        "Instructions for the AI comment, e.g. a short casual 'let's work soon' message. "
+        "Uses the follow_vision.yml / post_reel.yml API key."
+    ),
+}
+
+
+def get_follow_vision_schema() -> dict[str, Any]:
+    from dashboard.gramaddict_field_help import enrich_fields
+
+    return {"fields": enrich_fields(FOLLOW_VISION_FIELDS, FOLLOW_VISION_HELP)}
+
+
+def get_account_follow_vision(account_id: str) -> dict[str, Any]:
+    return fva.get_account_follow_vision(account_id)
+
+
+def save_account_follow_vision(account_id: str, updates: dict[str, Any]) -> dict[str, Any]:
+    path = ACCOUNTS_DIR / account_id / fva.FOLLOW_VISION_FILENAME
+    data = get_account_follow_vision(account_id)
+    for key, value in updates.items():
+        if key == "enabled":
+            data[key] = bool(value)
+        else:
+            data[key] = value
+    data.pop("openai-model", None)
+    _save_yaml(path, data)
+    return get_account_follow_vision(account_id)
+
+
+def get_account_follow_vision_prompts(account_id: str) -> dict[str, str]:
+    return fva.get_account_follow_vision_prompts(account_id)
+
+
+def save_account_follow_vision_prompts(
+    account_id: str, updates: dict[str, str]
+) -> dict[str, str]:
+    path = ACCOUNTS_DIR / account_id / fva.FOLLOW_VISION_PROMPTS_FILENAME
+    data = get_account_follow_vision_prompts(account_id)
+    data.update({k: str(v) for k, v in updates.items()})
+    _save_yaml(path, data)
+    return get_account_follow_vision_prompts(account_id)

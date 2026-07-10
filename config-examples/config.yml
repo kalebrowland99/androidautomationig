@@ -13,6 +13,8 @@ username: myusername # you have to put your IG name here!
 app-id: com.instagram.android
 use-cloned-app: false
 allow-untested-ig-version: false # Using an untested version of IG would cause unexpected behavior because some elements in the user interface may have been changed
+ensure-vpn: false # open Shadowrocket and connect VPN before Instagram
+vpn-app-name: Shadowrocket
 screen-sleep: true
 screen-record: false
 speed-multiplier: 1
@@ -34,6 +36,7 @@ truncate-sources: 2-5
 ##############################################################################
 
 ## Interaction (active jobs)
+post-reels: 3
 blogger-followers: [ username1, username2 ]
 blogger-following: [ username1, username2 ]
 blogger-post-likers: [ username1, username2 ]
@@ -62,14 +65,14 @@ unfollow-any: 10-20
 unfollow-non-followers: 10-20
 unfollow-any-non-followers: 10-20
 unfollow-any-followers: 10-20
-unfollow-from-file: [usernames1.txt 7-15, usernames2.txt 6]
+unfollow-from-file: [unfollow_list.txt 1-2]
 
 ## Special modifier for unfollow jobs
 sort-followers-newest-to-oldest: false
 unfollow-delay: 15
 
 ## Remove followers (active jobs)
-remove-followers-from-file: [remove1.txt 5-10, remove2.txt 6]
+remove-followers-from-file: [remove_list.txt 1-2]
 
 ## Special modifier for remove followers
 delete-removed-followers: true

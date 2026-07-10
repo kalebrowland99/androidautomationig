@@ -1,0 +1,9 @@
+enabled: true
+prompt-batch: 615FILMS
+ai-comment-enabled: true
+ai-comment-prompt: 'Write one very short, casual Instagram comment aimed at a musician
+  or artist, hinting that you want to collaborate or work together soon. Keep it under
+  8 words, sound like a real person, lowercase is fine, and sometimes end with a fire
+  emoji. Examples: "let''s work soon 🔥", "gotta work soon", "need to shoot something
+  soon 🔥", "lets create soon". Return only the comment text — no quotes, no hashtags,
+  no extra words.'

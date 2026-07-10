@@ -35,6 +35,7 @@ from GramAddict.core.utils import (
     head_up_notifications,
     kill_atx_agent,
 )
+from GramAddict.core.vpn import ensure_shadowrocket_vpn
 from GramAddict.core.utils import load_config as load_utils
 from GramAddict.core.utils import (
     move_usernames_to_accounts,
@@ -147,6 +148,12 @@ def start_bot(**kwargs):
                 stop_bot(device, sessions, session_state, was_sleeping=False)
 
         logger.info("Device screen ON and unlocked.")
+        if configs.args.ensure_vpn:
+            vpn_app = configs.args.vpn_app_name or "Shadowrocket"
+            if not ensure_shadowrocket_vpn(device, vpn_app):
+                logger.critical("VPN check failed. Aborting session.")
+                stop_bot(device, sessions, session_state, was_sleeping=False)
+                continue
         if open_instagram(device):
             try:
                 running_ig_version = get_instagram_version()
@@ -251,7 +258,20 @@ def start_bot(**kwargs):
         logger.info(
             f"There is/are {len(jobs_list)-len(unfollow_jobs)} active-job(s) and {len(unfollow_jobs)} unfollow-job(s) scheduled for this session."
         )
-        storage = Storage(session_state.my_username)
+        from GramAddict.core.brand_pool import resolve_brand_pool
+
+        config_path = None
+        if "--config" in configs.args:
+            try:
+                config_path = configs.args[configs.args.index("--config") + 1]
+            except (IndexError, ValueError):
+                config_path = None
+        brand_pool = resolve_brand_pool(
+            config_path=config_path,
+            config=getattr(configs, "config", None),
+            ig_username=session_state.my_username,
+        )
+        storage = Storage(session_state.my_username, brand_pool=brand_pool)
         filters = Filter(storage)
         show_ending_conditions()
         if not configs.args.debug:

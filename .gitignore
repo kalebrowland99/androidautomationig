@@ -13,6 +13,9 @@
 crashes
 accounts
 !config-examples/*
+.cursor/
+tools/scrcpy-macos-x86_64-v3.3.4/
+tools/scrcpy-macos-x86_64-v3.3.4.tar.gz
 Pipfile
 Pipfile.lock
 *.pdf

@@ -1,0 +1,168 @@
+"""GramAddict config field definitions for the dashboard UI."""
+
+from __future__ import annotations
+
+from typing import Any
+
+# All config.yml keys the dashboard can edit (kebab-case).
+EDITABLE_FIELDS: dict[str, list[dict[str, Any]]] = {
+    "general": [
+        {"key": "username", "label": "Instagram username", "type": "text", "placeholder": "yourname"},
+        {"key": "device", "label": "Phone", "type": "device"},
+        {
+            "key": "brand-pool",
+            "label": "Brand pool",
+            "type": "select",
+            "options": ["", "615films", "ylf"],
+            "default": "",
+        },
+        {"key": "app-id", "label": "Instagram app ID", "type": "text", "default": "com.instagram.android"},
+        {"key": "use-cloned-app", "label": "Using a copy/clone of Instagram", "type": "bool"},
+        {"key": "allow-untested-ig-version", "label": "Allow newer Instagram app versions", "type": "bool"},
+        {"key": "ensure-vpn", "label": "Connect VPN before opening Instagram", "type": "bool"},
+        {"key": "screen-sleep", "label": "Dim screen while waiting", "type": "bool"},
+        {"key": "screen-record", "label": "Record the screen during sessions", "type": "bool"},
+        {"key": "speed-multiplier", "label": "Speed", "type": "text", "default": "1"},
+        {"key": "debug", "label": "Extra detail in the activity log", "type": "bool"},
+        {"key": "close-apps", "label": "Close other apps before starting", "type": "bool"},
+        {"key": "kill-atx-agent", "label": "Stop phone automation helper when done", "type": "bool"},
+        {"key": "restart-atx-agent", "label": "Restart phone automation helper each session", "type": "bool"},
+        {"key": "disable-block-detection", "label": "Skip “account blocked” checks", "type": "bool"},
+        {"key": "disable-filters", "label": "Ignore profile filters for this account", "type": "bool"},
+        {"key": "dont-type", "label": "Paste text instead of typing", "type": "bool"},
+        {"key": "shuffle-jobs", "label": "Randomize job order each session", "type": "bool"},
+        {"key": "truncate-sources", "label": "How many targets per session", "type": "text", "default": "2-5", "placeholder": "2-5"},
+        {"key": "total-crashes-limit", "label": "Stop after this many crashes", "type": "text", "default": "5"},
+        {"key": "count-app-crashes", "label": "Count Instagram closing as a crash", "type": "bool"},
+    ],
+    "actions": [
+        {"key": "post-reels", "label": "Post Reels (videos in queue)", "type": "text", "placeholder": "3"},
+        {"key": "feed", "label": "Like posts on your home feed", "type": "text", "placeholder": "3"},
+        {"key": "blogger", "label": "Visit these accounts", "type": "lines", "placeholder": "username"},
+        {"key": "blogger-followers", "label": "Visit followers of these accounts", "type": "lines", "placeholder": "username"},
+        {"key": "blogger-following", "label": "Visit who these accounts follow", "type": "lines", "placeholder": "username"},
+        {"key": "blogger-post-likers", "label": "Visit people who liked their posts", "type": "lines", "placeholder": "username"},
+        {"key": "hashtag-likers-top", "label": "Visit likers on top hashtag posts", "type": "lines", "placeholder": "hashtag"},
+        {"key": "hashtag-likers-recent", "label": "Visit likers on recent hashtag posts", "type": "lines", "placeholder": "hashtag"},
+        {"key": "hashtag-posts-top", "label": "Interact via top hashtag posts", "type": "lines", "placeholder": "hashtag"},
+        {"key": "hashtag-posts-recent", "label": "Interact via recent hashtag posts", "type": "lines", "placeholder": "hashtag"},
+    ],
+    "extra": [
+        {
+            "key": "interact-from-file",
+            "label": "Usernames to visit from a list",
+            "type": "inline-file-job",
+            "file": "targets.txt",
+            "placeholder": "username",
+            "limit_placeholder": "10-15",
+        },
+        {
+            "key": "posts-from-file",
+            "label": "Post URLs to like",
+            "type": "inline-lines-file",
+            "file": "post_urls.txt",
+            "placeholder": "https://www.instagram.com/p/…",
+        },
+        {
+            "key": "like-from-urls",
+            "label": "Extra post URLs to like",
+            "type": "inline-lines-file",
+            "file": "like_urls.txt",
+            "placeholder": "https://www.instagram.com/p/…",
+        },
+    ],
+    "modifiers": [
+        {"key": "watch-video-time", "label": "Seconds to watch videos", "type": "text", "default": "15-35"},
+        {"key": "watch-photo-time", "label": "Seconds to view photos", "type": "text", "default": "3-4"},
+        {"key": "can-reinteract-after", "label": "Wait before visiting same person again (hours)", "type": "text", "placeholder": "48"},
+        {"key": "delete-interacted-users", "label": "Remove names from list files after visiting", "type": "bool"},
+    ],
+    "unfollow": [
+        {"key": "unfollow", "label": "Unfollow people you follow", "type": "text", "placeholder": "10-20"},
+        {"key": "unfollow-any", "label": "Unfollow anyone (up to limit)", "type": "text", "placeholder": "10-20"},
+        {"key": "unfollow-non-followers", "label": "Unfollow people who don’t follow back", "type": "text", "placeholder": "10-20"},
+        {"key": "unfollow-any-non-followers", "label": "Unfollow non-followers (broader)", "type": "text", "placeholder": "10-20"},
+        {"key": "unfollow-any-followers", "label": "Unfollow even if they follow you", "type": "text", "placeholder": "10-20"},
+        {"key": "unfollow-from-list", "label": "Unfollow from your unfollow list (count)", "type": "text", "placeholder": "1-2"},
+        {"key": "sort-followers-newest-to-oldest", "label": "Unfollow newest followers first", "type": "bool"},
+        {"key": "unfollow-delay", "label": "Min days since follow before unfollow", "type": "text", "default": "15"},
+        {"key": "remove-followers-from-list", "label": "Remove followers from your remove list (count)", "type": "text", "placeholder": "1-2"},
+        {"key": "delete-removed-followers", "label": "Remove names from file after removing", "type": "bool"},
+    ],
+    "source_limits": [
+        {"key": "interactions-count", "label": "People to visit per target", "type": "text", "default": "30-40"},
+        {"key": "likes-count", "label": "Posts to like per person", "type": "text", "default": "1-2"},
+        {"key": "likes-percentage", "label": "Chance to like posts", "type": "text", "default": "100"},
+        {"key": "stories-count", "label": "Stories to watch per person", "type": "text", "default": "1-2"},
+        {"key": "stories-percentage", "label": "Chance to watch stories", "type": "text", "default": "30-40"},
+        {"key": "carousel-count", "label": "Carousel slides to swipe", "type": "text", "default": "2-3"},
+        {"key": "carousel-percentage", "label": "Chance to swipe carousels", "type": "text", "default": "60-70"},
+        {"key": "max-comments-pro-user", "label": "Max comments per person", "type": "text", "default": "1-2"},
+        {"key": "comment-percentage", "label": "Chance to leave a comment", "type": "text", "placeholder": "30"},
+        {"key": "pm-percentage", "label": "Chance to send a DM", "type": "text", "placeholder": "10"},
+        {"key": "interact-percentage", "label": "Chance to interact in hashtag feeds", "type": "text", "default": "30-40"},
+        {"key": "follow-percentage", "label": "Chance to follow after visiting", "type": "text", "default": "30-40"},
+        {"key": "follow-limit", "label": "Max follows per target", "type": "text", "default": "50"},
+        {"key": "skipped-list-limit", "label": "Scrolls before skipping a target", "type": "text", "default": "10-15"},
+        {"key": "skipped-posts-limit", "label": "Already-liked posts to skip", "type": "text", "default": "5"},
+        {"key": "fling-when-skipped", "label": "Fast-scroll after skips", "type": "text", "default": "0"},
+        {"key": "min-following", "label": "Only visit people following at least…", "type": "text", "default": "100"},
+    ],
+    "session_limits": [
+        {"key": "total-likes-limit", "label": "Max likes per session", "type": "text", "default": "120-150"},
+        {"key": "total-follows-limit", "label": "Max follows per session", "type": "text", "default": "40-50"},
+        {"key": "total-unfollows-limit", "label": "Max unfollows per session", "type": "text", "default": "40-50"},
+        {"key": "total-watches-limit", "label": "Max story watches per session", "type": "text", "default": "120-150"},
+        {"key": "total-interactions-limit", "label": "Max total actions per session", "type": "text", "default": "280-300"},
+        {"key": "total-successful-interactions-limit", "label": "Max successful actions per session", "type": "text", "default": "120-150"},
+        {"key": "total-comments-limit", "label": "Max comments per session", "type": "text", "default": "3-5"},
+        {"key": "total-pm-limit", "label": "Max DMs per session", "type": "text", "default": "3-5"},
+        {"key": "total-scraped-limit", "label": "Max usernames to save to file", "type": "text", "default": "100-150"},
+    ],
+    "ending": [
+        {"key": "end-if-likes-limit-reached", "label": "Stop session when like limit is hit", "type": "bool"},
+        {"key": "end-if-follows-limit-reached", "label": "Stop session when follow limit is hit", "type": "bool"},
+        {"key": "end-if-watches-limit-reached", "label": "Stop session when story limit is hit", "type": "bool"},
+        {"key": "end-if-comments-limit-reached", "label": "Stop session when comment limit is hit", "type": "bool"},
+        {"key": "end-if-pm-limit-reached", "label": "Stop session when DM limit is hit", "type": "bool"},
+    ],
+    "scheduling": [
+        {"key": "working-hours", "label": "Allowed hours each day", "type": "working-hours"},
+        {"key": "time-delta", "label": "Random start-time wiggle (minutes)", "type": "text", "default": "10-15"},
+        {"key": "repeat", "label": "Break between sessions (minutes)", "type": "text", "default": "280-320"},
+        {"key": "total-sessions", "label": "How many sessions to run", "type": "text", "default": "1", "placeholder": "1"},
+    ],
+    "scripts": [
+        {"key": "pre-script", "label": "Run before bot starts", "type": "text"},
+        {"key": "post-script", "label": "Run after bot finishes", "type": "text"},
+        {"key": "scrape-to-file", "label": "Save found usernames to file", "type": "text"},
+    ],
+    "reports": [
+        {"key": "telegram-reports", "label": "Send Telegram summary when done", "type": "bool"},
+    ],
+}
+
+ACCOUNT_CONFIG_TABS: dict[str, list[str]] = {
+    "basics": ["general"],
+    "jobs": ["actions", "modifiers", "unfollow", "scripts", "extra"],
+    "limits": ["source_limits", "session_limits", "ending"],
+    "schedule": ["scheduling"],
+    "reports": ["reports"],
+}
+
+SECTION_LABELS = {
+    "general": "General Configuration",
+    "actions": "Actions",
+    "extra": "Extra",
+    "modifiers": "Special modifier for jobs and sources",
+    "unfollow": "Unfollow (unfollow jobs)",
+    "source_limits": "Source Limits",
+    "session_limits": "Total Limits Per Session",
+    "ending": "Ending Session Conditions",
+    "scheduling": "Scheduling",
+    "scripts": "Special actions",
+    "reports": "Post Processing",
+}
+
+# Sections rendered as a collapsed <details> block in the account UI.
+COLLAPSED_SECTIONS = ["extra"]

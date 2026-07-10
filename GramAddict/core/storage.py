@@ -26,30 +26,47 @@ FILENAME_MESSAGES = "pm_list.txt"
 
 
 class Storage:
-    def __init__(self, my_username):
+    def __init__(self, my_username, brand_pool: Optional[str] = None):
         if my_username is None:
             logger.error(
                 "No username, thus the script won't get access to interacted users and sessions data."
             )
             return
+        self.my_username = my_username
+        self.brand_pool = brand_pool
         self.account_path = os.path.join(ACCOUNTS, my_username)
         if not os.path.exists(self.account_path):
             os.makedirs(self.account_path)
         self.interacted_users = {}
         self.history_filter_users = {}
 
-        self.interacted_users_path = os.path.join(
-            self.account_path, FILENAME_INTERACTED_USERS
-        )
-        if os.path.isfile(self.interacted_users_path):
-            with open(self.interacted_users_path, encoding="utf-8") as json_file:
-                try:
-                    self.interacted_users = json.load(json_file)
-                except Exception as e:
-                    logger.error(
-                        f"Please check {json_file.name}, it contains this error: {e}"
-                    )
-                    sys.exit(0)
+        if brand_pool:
+            from GramAddict.core.brand_pool import (
+                interacted_users_path,
+                load_interacted_users,
+                migrate_account_interactions,
+            )
+
+            migrate_account_interactions(my_username, brand_pool)
+            self.interacted_users_path = interacted_users_path(brand_pool)
+            self.interacted_users = load_interacted_users(brand_pool)
+            logger.info(
+                f"Using brand pool '{brand_pool}' for interaction history "
+                f"({len(self.interacted_users)} users in pool)."
+            )
+        else:
+            self.interacted_users_path = os.path.join(
+                self.account_path, FILENAME_INTERACTED_USERS
+            )
+            if os.path.isfile(self.interacted_users_path):
+                with open(self.interacted_users_path, encoding="utf-8") as json_file:
+                    try:
+                        self.interacted_users = json.load(json_file)
+                    except Exception as e:
+                        logger.error(
+                            f"Please check {json_file.name}, it contains this error: {e}"
+                        )
+                        sys.exit(0)
         self.history_filter_users_path = os.path.join(
             self.account_path, FILENAME_HISTORY_FILTER_USERS
         )

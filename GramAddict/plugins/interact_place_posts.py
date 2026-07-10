@@ -58,6 +58,9 @@ class InteractPlacePosts(Plugin):
         self.session_state = sessions[-1]
         self.args = configs.args
         self.current_mode = plugin
+        logger.warning(
+            "Instagram removed location/place search — place jobs are deprecated and will likely fail."
+        )
 
         # Handle sources
         sources = [

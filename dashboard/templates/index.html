@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GramAddict</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        border: 'hsl(var(--border))',
+                        input: 'hsl(var(--input))',
+                        ring: 'hsl(var(--ring))',
+                        background: 'hsl(var(--background))',
+                        foreground: 'hsl(var(--foreground))',
+                        primary: { DEFAULT: 'hsl(var(--primary))', foreground: 'hsl(var(--primary-foreground))' },
+                        secondary: { DEFAULT: 'hsl(var(--secondary))', foreground: 'hsl(var(--secondary-foreground))' },
+                        muted: { DEFAULT: 'hsl(var(--muted))', foreground: 'hsl(var(--muted-foreground))' },
+                        accent: { DEFAULT: 'hsl(var(--accent))', foreground: 'hsl(var(--accent-foreground))' },
+                        card: { DEFAULT: 'hsl(var(--card))', foreground: 'hsl(var(--card-foreground))' },
+                    },
+                    borderRadius: { lg: 'var(--radius)', md: 'calc(var(--radius) - 2px)', sm: 'calc(var(--radius) - 4px)' },
+                },
+            },
+        };
+    </script>
+    <style>
+        :root {
+            --background: 0 0% 100%;
+            --foreground: 0 0% 3.9%;
+            --card: 0 0% 100%;
+            --card-foreground: 0 0% 3.9%;
+            --primary: 0 0% 9%;
+            --primary-foreground: 0 0% 98%;
+            --secondary: 0 0% 96.1%;
+            --secondary-foreground: 0 0% 9%;
+            --muted: 0 0% 96.1%;
+            --muted-foreground: 0 0% 45.1%;
+            --accent: 0 0% 96.1%;
+            --accent-foreground: 0 0% 9%;
+            --border: 0 0% 89.8%;
+            --input: 0 0% 89.8%;
+            --ring: 0 0% 3.9%;
+            --radius: 0.75rem;
+            --brand: #6366f1;
+        }
+    </style>
+    <link rel="stylesheet" href="/static/dashboard.css?v=38">
+</head>
+<body class="min-h-screen bg-white text-foreground antialiased brand-gramaddict">
+    <div id="page-banner"></div>
+
+    <div class="container max-w-6xl mx-auto px-4 pb-10">
+        <div class="dashboard-sticky-top">
+        <header class="relative pt-4 shrink-0">
+            <nav class="flex items-center justify-between rounded-xl bg-background py-2.5 px-4 shadow-lg border">
+                <div class="flex items-center gap-4 md:gap-6">
+                    <nav class="brand-nav tabs-list" aria-label="Main" role="tablist">
+                        <a href="#farm" class="main-tab tabs-trigger active" data-tab="farm" aria-selected="true" role="tab">Farm</a>
+                        <a href="#account" class="main-tab tabs-trigger" data-tab="account" aria-selected="false" role="tab">Account</a>
+                        <a href="#tools" class="main-tab tabs-trigger" data-tab="tools" aria-selected="false" role="tab">Tools</a>
+                    </nav>
+                </div>
+                <div class="flex items-center gap-3 text-xs text-muted-foreground">
+                    <span id="farm-online-count">0 devices</span>
+                    <span class="hidden md:inline text-border">|</span>
+                    <span id="live-indicator" class="live-pill off">
+                        <span class="dot"></span>
+                        <span id="connection-status">Connecting</span>
+                    </span>
+                </div>
+            </nav>
+        </header>
+
+        <div class="context-strip context-strip-sticky rounded-xl border shadow-sm bg-background mt-4 px-4 py-2.5 flex flex-wrap items-center justify-between gap-3">
+            <div class="context-strip-left flex flex-wrap items-center gap-x-4 gap-y-1 text-xs shrink-0">
+                <span class="context-item context-item-phone">
+                    <span class="context-label">Phone</span>
+                    <select id="ctx-phone-select" class="ctx-phone-select ga-input hidden" aria-label="Active phone" onchange="onCtxPhoneChange()"></select>
+                    <strong id="ctx-phone" class="ctx-phone-text">None selected</strong>
+                </span>
+                <span class="context-item"><span class="context-label">Account</span> <strong id="ctx-account">None</strong></span>
+                <span id="ctx-status" class="context-status idle">Idle</span>
+            </div>
+            <div class="context-strip-actions flex flex-wrap gap-2 shrink-0 ml-auto">
+                <button type="button" class="btn-ghost btn-sm" id="btn-ctx-quick-debug" onclick="runQuickDebug()" disabled title="Run last debug step from Tools">Debug</button>
+                <button type="button" class="btn-ghost btn-sm" id="btn-ctx-mirror" onclick="mirrorSelected()" disabled>Mirror</button>
+            </div>
+        </div>
+        </div>
+
+        <main class="relative py-8 md:py-10">
+            <!-- FARM -->
+            <section id="view-farm" class="app-view">
+                <div class="farm-header">
+                    <div class="farm-header-copy">
+                        <h1 class="farm-header-title">Run GramAddict</h1>
+                        <p class="farm-header-lead">Select a phone and account in the table, then start or stop a session below.</p>
+                    </div>
+                    <div class="farm-header-actions">
+                        <button type="button" id="btn-farm-run" onclick="runGramAddict()"
+                            class="btn-ghost btn-sm btn-primary-outline" disabled>Run</button>
+                        <button type="button" id="btn-farm-stop" onclick="stopGramAddict()" disabled
+                            class="btn-ghost btn-sm btn-kill">Stop</button>
+                        <button type="button" id="btn-refresh-all" onclick="refreshDevices()"
+                            class="btn-ghost btn-sm">Refresh devices</button>
+                    </div>
+                </div>
+
+                <div class="grid lg:grid-cols-5 gap-5 md:gap-6 items-start">
+                    <div class="lg:col-span-2 rounded-3xl border p-4 md:p-5 shadow-sm bg-background">
+                        <div class="flex items-center justify-between mb-3">
+                            <h2 class="text-sm font-semibold">Devices</h2>
+                            <span id="batch-slot-count" class="text-xs text-muted-foreground">0 selected</span>
+                        </div>
+                        <div class="phones-table-wrap">
+                            <table class="phones-table">
+                                <thead>
+                                    <tr>
+                                        <th class="phones-th phones-th-check" scope="col">
+                                            <input type="checkbox" id="batch-select-all" class="ui-checkbox phones-check"
+                                                   aria-label="Select all devices"
+                                                   onchange="onBatchSelectAllChange(this.checked)"
+                                                   onclick="event.stopPropagation()">
+                                        </th>
+                                        <th class="phones-th phones-th-slot" scope="col">#</th>
+                                        <th class="phones-th" scope="col">Serial</th>
+                                        <th class="phones-th" scope="col">Account</th>
+                                        <th class="phones-th" scope="col">Status</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="farm-grid"></tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="lg:col-span-3 farm-log rounded-3xl border p-4 md:p-5 shadow-sm bg-background flex flex-col min-h-[24rem]">
+                        <div class="flex items-center justify-between mb-3 shrink-0">
+                            <h2 class="text-sm font-semibold">Activity log</h2>
+                            <div class="flex gap-2">
+                                <button type="button" class="btn-ghost" id="btn-autoscroll" onclick="toggleAutoscroll()">Auto-scroll</button>
+                                <button type="button" class="btn-ghost" onclick="clearLog()">Clear</button>
+                            </div>
+                        </div>
+                        <div id="unified-log" class="flex-1 overflow-y-auto pr-1 min-h-0"></div>
+                    </div>
+                </div>
+
+                <div class="brand-pools-panel rounded-3xl border p-4 md:p-5 shadow-sm bg-background mt-5">
+                    <div class="brand-pools-header">
+                        <div>
+                            <h2 class="text-sm font-semibold">Brand pools</h2>
+                            <p class="brand-pools-hint">Accounts in the same pool share follow, like, and comment history — they won't hit the same people twice. Using the same account as a target blogger is fine.</p>
+                        </div>
+                        <button type="button" class="btn-ghost btn-sm" id="btn-refresh-brand-pools">Refresh</button>
+                    </div>
+                    <div id="brand-pools-grid" class="brand-pools-grid" aria-live="polite"></div>
+                </div>
+            </section>
+
+            <!-- ACCOUNT -->
+            <section id="view-account" class="app-view hidden">
+                <div class="account-page">
+                    <header class="account-page-header">
+                        <h1 class="account-page-title">Account</h1>
+                        <p class="account-page-lead">Settings autosave. Use search in the sidebar to jump to any field.</p>
+                    </header>
+
+                    <div id="account-session-estimate" class="account-session-estimate hidden" aria-live="polite">
+                        <div class="account-estimate-stats ctx-est-stats">
+                            <span class="ctx-est-stat" title="Estimated length of one GramAddict session (START → jobs → FINISH)">
+                                <span class="ctx-est-label">Session</span>
+                                <strong data-est="duration">—</strong>
+                            </span>
+                            <span class="ctx-est-divider" aria-hidden="true">·</span>
+                            <span class="ctx-est-stat" title="Which limit will likely end the session first">
+                                <span class="ctx-est-label">Stops at</span>
+                                <strong data-est="binding">—</strong>
+                            </span>
+                            <span class="ctx-est-divider" aria-hidden="true">·</span>
+                            <span class="ctx-est-stat" title="Profile visits before session caps">
+                                <span class="ctx-est-label">Profiles</span>
+                                <strong data-est="profiles">—</strong>
+                            </span>
+                            <span data-est="warn-badge" class="ctx-est-warn-badge hidden" title=""></span>
+                        </div>
+                        <p class="ctx-est-schedule account-estimate-schedule" data-est="schedule"></p>
+                    </div>
+
+                    <p id="ga-no-accounts" class="account-empty-state">No accounts yet — create one on Farm or use + below.</p>
+
+                    <div id="ga-config-fields" class="account-shell hidden">
+                        <aside class="account-sidebar">
+                            <div class="account-picker">
+                                <label for="ga-account-select" class="account-picker-label"><code class="ga-field-key">username</code></label>
+                                <div class="account-picker-row">
+                                    <select id="ga-account-select" class="ga-input account-picker-select" onchange="onGaAccountChange()"></select>
+                                    <button type="button" class="btn-icon btn-ghost" onclick="createGaAccount()" aria-label="New account" title="New account">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <nav class="account-nav" id="account-subnav" aria-label="Account sections" role="tablist">
+                                <div class="account-nav-group">
+                                    <span class="account-nav-label">Core</span>
+                                    <div class="account-nav-tabs tabs-list-vertical">
+                                        <button type="button" class="account-subtab tabs-trigger tabs-trigger-vertical active" data-account-tab="basics" aria-selected="true" role="tab">Basics</button>
+                                        <button type="button" class="account-subtab tabs-trigger tabs-trigger-vertical" data-account-tab="schedule" aria-selected="false" role="tab">Schedule</button>
+                                    </div>
+                                </div>
+                                <div class="account-nav-group">
+                                    <span class="account-nav-label">Actions</span>
+                                    <div class="account-nav-tabs tabs-list-vertical">
+                                        <button type="button" class="account-subtab tabs-trigger tabs-trigger-vertical" data-account-tab="jobs" aria-selected="false" role="tab">Jobs</button>
+                                        <button type="button" class="account-subtab tabs-trigger tabs-trigger-vertical" data-account-tab="posting" aria-selected="false" role="tab">Posting</button>
+                                    </div>
+                                </div>
+                                <div class="account-nav-group">
+                                    <span class="account-nav-label">Safety</span>
+                                    <div class="account-nav-tabs tabs-list-vertical">
+                                        <button type="button" class="account-subtab tabs-trigger tabs-trigger-vertical" data-account-tab="limits" aria-selected="false" role="tab">Limits</button>
+                                        <button type="button" class="account-subtab tabs-trigger tabs-trigger-vertical" data-account-tab="filters" aria-selected="false" role="tab">Filters</button>
+                                    </div>
+                                </div>
+                                <div class="account-nav-group">
+                                    <span class="account-nav-label">Usernames</span>
+                                    <div class="account-nav-tabs tabs-list-vertical">
+                                        <button type="button" class="account-subtab tabs-trigger tabs-trigger-vertical" data-account-tab="lists" aria-selected="false" role="tab">Usernames</button>
+                                        <button type="button" class="account-subtab tabs-trigger tabs-trigger-vertical" data-account-tab="comments" aria-selected="false" role="tab">Comments &amp; PM</button>
+                                    </div>
+                                </div>
+                                <div class="account-nav-group">
+                                    <span class="account-nav-label">More</span>
+                                    <div class="account-nav-tabs tabs-list-vertical">
+                                        <button type="button" class="account-subtab tabs-trigger tabs-trigger-vertical" data-account-tab="reports" aria-selected="false" role="tab">Reports</button>
+                                        <button type="button" class="account-subtab tabs-trigger tabs-trigger-vertical" data-account-tab="raw" aria-selected="false" role="tab">Raw YAML</button>
+                                    </div>
+                                </div>
+                            </nav>
+
+                            <div class="account-setting-search-wrap">
+                                <input type="search" id="account-setting-search" class="account-setting-search ga-input"
+                                       placeholder="Find a setting…" autocomplete="off"
+                                       aria-label="Search account settings"
+                                       oninput="onSettingSearchInput()" onkeydown="onSettingSearchKeydown(event)">
+                                <div id="account-setting-results" class="account-setting-results hidden" role="listbox"></div>
+                            </div>
+
+                            <div class="account-templates-block">
+                                <span class="account-nav-label">Settings templates</span>
+                                <p class="account-templates-hint">Copies everything on the account (jobs, limits, filters, posting, comments, lists). Only this account’s username and phone link stay.</p>
+                                <div class="account-templates-save">
+                                    <input type="text" id="template-save-name" class="ga-input" placeholder="Template name" autocomplete="off">
+                                    <button type="button" class="btn-ghost btn-sm" id="btn-save-template">Save as template</button>
+                                </div>
+                                <div class="account-templates-load">
+                                    <select id="template-load-source" class="ga-input">
+                                        <option value="">Load from…</option>
+                                    </select>
+                                    <label class="ga-check account-templates-check">
+                                        <input type="checkbox" class="ui-checkbox" id="template-include-lists" checked>
+                                        <span class="ga-check-label">Include username lists</span>
+                                    </label>
+                                    <button type="button" class="btn-ghost btn-sm" id="btn-apply-settings">Apply</button>
+                                </div>
+                            </div>
+
+                            <button type="button" class="account-delete-btn btn-ghost btn-kill" id="btn-delete-account" onclick="deleteGaAccount()" disabled aria-label="Delete account">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                                <span>Delete account</span>
+                            </button>
+                        </aside>
+
+                        <div class="account-main">
+                            <div id="account-panel-basics" class="account-panel">
+                                <div id="ga-terminology-key" class="ga-terminology-key" aria-label="GramAddict key terms"></div>
+                                <div id="ga-form-basics" class="ga-form-sections"></div>
+                            </div>
+
+                            <div id="account-panel-jobs" class="account-panel hidden">
+                                <div id="ga-form-jobs" class="ga-form-sections"></div>
+                            </div>
+
+                            <div id="account-panel-posting" class="account-panel hidden">
+                                <p class="account-posting-note">Reel videos are uploaded on the <strong>Jobs</strong> tab. Set <code>post-reels</code> to how many videos you want in the queue — the bot posts <strong>1 per session</strong>, rotating through them.</p>
+                                <div id="ga-form-post-reel" class="adv-grid-2 account-posting-fields"></div>
+                                <div class="account-posting-prompts">
+                                    <div class="field">
+                                        <label for="post-reel-prompt-615">615FILMS caption prompt</label>
+                                        <textarea id="post-reel-prompt-615" class="ga-input" rows="5" spellcheck="true" data-pr-prompt="615FILMS"></textarea>
+                                    </div>
+                                    <div class="field">
+                                        <label for="post-reel-prompt-ylf">YourLoveFilms caption prompt</label>
+                                        <textarea id="post-reel-prompt-ylf" class="ga-input" rows="5" spellcheck="true" data-pr-prompt="YourLoveFilms"></textarea>
+                                    </div>
+                                </div>
+                                <div class="account-posting-section-divider"></div>
+                                <h3 class="account-posting-subhead">Follow vision filter</h3>
+                                <p class="account-posting-note">Screenshots each profile before interacting. OpenAI Vision must return the pass phrase from your prompt (e.g. <code>potential musician</code> or <code>potential couple</code>). Uses the OpenAI key from Reel posting unless set separately.</p>
+                                <div id="ga-form-follow-vision" class="adv-grid-2 account-posting-fields"></div>
+                                <div class="account-posting-prompts">
+                                    <div class="field">
+                                        <label for="follow-vision-prompt-615">615FILMS vision prompt</label>
+                                        <textarea id="follow-vision-prompt-615" class="ga-input" rows="5" spellcheck="true" data-fv-prompt="615FILMS"></textarea>
+                                    </div>
+                                    <div class="field">
+                                        <label for="follow-vision-prompt-ylf">YourLoveFilms vision prompt</label>
+                                        <textarea id="follow-vision-prompt-ylf" class="ga-input" rows="5" spellcheck="true" data-fv-prompt="YourLoveFilms"></textarea>
+                                    </div>
+                                </div>
+                                <p class="adv-status-line" id="post-reel-media-hint"></p>
+                            </div>
+
+                            <div id="account-panel-limits" class="account-panel hidden">
+                                <div id="ga-form-limits" class="ga-form-sections"></div>
+                            </div>
+
+                            <div id="account-panel-filters" class="account-panel hidden">
+                                <div id="ga-form-filters" class="ga-form-sections"></div>
+                            </div>
+
+                            <div id="account-panel-lists" class="account-panel hidden">
+                                <div id="ga-form-lists" class="account-file-editors"></div>
+                            </div>
+
+                            <div id="account-panel-comments" class="account-panel hidden">
+                                <div id="ga-form-comments" class="account-file-editors"></div>
+                            </div>
+
+                            <div id="account-panel-schedule" class="account-panel hidden">
+                                <div id="ga-form-schedule" class="ga-form-sections"></div>
+                            </div>
+
+                            <div id="account-panel-reports" class="account-panel hidden">
+                                <div id="ga-form-reports" class="ga-form-sections"></div>
+                                <div class="account-telegram-block">
+                                    <p class="account-section-label">Telegram credentials</p>
+                                    <div id="ga-form-telegram" class="adv-grid-2"></div>
+                                </div>
+                            </div>
+
+                            <div id="account-panel-raw" class="account-panel hidden">
+                                <textarea id="ga-raw-yaml" class="ga-input ga-raw-yaml" rows="22" spellcheck="false" placeholder="Full config.yml…"></textarea>
+                            </div>
+
+                            <p class="account-save-status" id="ga-config-status"></p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- TOOLS -->
+            <section id="view-tools" class="app-view hidden">
+                <div class="tools-page">
+                    <header class="tools-page-header">
+                        <h1 class="tools-page-title">Device tools</h1>
+                        <p id="tools-subtitle" class="tools-page-lead">Inspect the screen, run debug steps, and test pipeline stages.</p>
+                    </header>
+
+                    <div class="tools-sections">
+                    <section class="tools-section" id="inspector-panel">
+                        <div class="tools-section-head">
+                            <div>
+                                <h2 class="tools-section-title">UI inspector</h2>
+                                <p id="inspector-subtitle" class="tools-section-lead">Weditor — dump hierarchy and pick elements</p>
+                            </div>
+                            <div class="tools-section-actions">
+                                <button type="button" class="btn-ghost btn-sm" id="btn-weditor-reconnect" onclick="connectWeditor()" disabled>Reconnect</button>
+                                <button type="button" class="btn-ghost btn-sm" id="btn-weditor-tab" onclick="openWeditorInTab()" disabled>Open in tab</button>
+                                <button type="button" class="btn-ghost btn-sm" id="btn-export-dump" onclick="dumpSelected()" disabled>Export dump</button>
+                                <button type="button" class="btn-ghost btn-sm" id="btn-home" onclick="pressHome()" disabled>Home</button>
+                            </div>
+                        </div>
+
+                        <div id="tools-empty" class="inspector-placeholder">Select a device on the Farm tab to open Weditor.</div>
+
+                        <div id="tools-weditor" class="hidden">
+                            <div id="weditor-placeholder" class="inspector-placeholder hidden">Starting Weditor…</div>
+                            <iframe
+                                id="weditor-frame"
+                                class="weditor-frame hidden"
+                                title="Weditor UI Inspector"
+                                allow="clipboard-read; clipboard-write"
+                            ></iframe>
+                        </div>
+                    </section>
+
+                    <section class="tools-section" id="debug-panel-wrap">
+                        <h2 class="tools-section-title">Debug flows</h2>
+                        <div class="field">
+                            <label>Debug flow</label>
+                            <div class="segmented-control">
+                                <label class="segment"><input type="radio" name="debug-flow-select" value="flow" checked onchange="switchDebugFlow(this.value)"><span>Session flow</span></label>
+                                <label class="segment"><input type="radio" name="debug-flow-select" value="feed" onchange="switchDebugFlow(this.value)"><span>Feed job</span></label>
+                                <label class="segment"><input type="radio" name="debug-flow-select" value="blogger-post-likers" onchange="switchDebugFlow(this.value)"><span>Blogger likers (prod)</span></label>
+                                <label class="segment"><input type="radio" name="debug-flow-select" value="reel-comment" onchange="switchDebugFlow(this.value)"><span>Reel comment</span></label>
+                                <label class="segment"><input type="radio" name="debug-flow-select" value="profile-post-video" onchange="switchDebugFlow(this.value)"><span>Profile post video</span></label>
+                                <label class="segment"><input type="radio" name="debug-flow-select" value="vpn" onchange="switchDebugFlow(this.value)"><span>VPN only</span></label>
+                                <label class="segment"><input type="radio" name="debug-flow-select" value="instagram" onchange="switchDebugFlow(this.value)"><span>Instagram taps</span></label>
+                            </div>
+                        </div>
+                        <div class="field debug-pipeline-field">
+                            <label id="debug-step-list-label">Pipeline steps (in order)</label>
+                            <p id="debug-step-list-hint" class="text-xs text-muted-foreground hidden">Scroll the list for more steps.</p>
+                            <p id="debug-server-stale-hint" class="text-xs text-destructive hidden"></p>
+                            <div id="debug-step-list" class="debug-step-list"></div>
+                            <select id="debug-test-select" class="sr-only" aria-hidden="true" tabindex="-1"></select>
+                        </div>
+                        <p class="adv-status-line" id="debug-status"></p>
+                        <div class="btn-row debug-tab-bar">
+                            <button type="button" class="btn-ghost btn-primary-outline" id="btn-debug-run" onclick="runDebugTest(false)">Run test</button>
+                            <button type="button" class="btn-ghost" id="btn-debug-run-all" onclick="runDebugTest(true)">Run A→Z</button>
+                            <button type="button" class="btn-ghost btn-kill" id="btn-debug-kill" onclick="killDebugTest()" disabled>Stop test</button>
+                        </div>
+                        <div class="field" id="debug-target-field" hidden>
+                            <label for="debug-target-username">Target @username</label>
+                            <input type="text" id="debug-target-username" class="ga-input" placeholder="account to search, follow, switch to" autocomplete="off" spellcheck="false" oninput="onDebugTargetChange()">
+                        </div>
+                        <div class="field" id="debug-search-field" hidden>
+                            <label for="debug-target-search">Hashtag</label>
+                            <input type="text" id="debug-target-search" class="ga-input" placeholder="fitness" autocomplete="off" spellcheck="false" oninput="onDebugSearchChange()">
+                        </div>
+                        <div class="field" id="debug-post-url-field" hidden>
+                            <label for="debug-target-post-url">Post URL</label>
+                            <input type="url" id="debug-target-post-url" class="ga-input" placeholder="https://www.instagram.com/p/…" autocomplete="off" spellcheck="false" oninput="onDebugPostUrlChange()">
+                        </div>
+                        <div class="field" id="debug-message-field" hidden>
+                            <label for="debug-test-message">Test comment / PM</label>
+                            <input type="text" id="debug-test-message" class="ga-input" placeholder="Message to send (comment or DM)" autocomplete="off" spellcheck="false" oninput="onDebugTestMessageChange()">
+                        </div>
+                        <div class="field" id="debug-likers-offset-field">
+                            <label for="debug-likers-tap-offset">Feed likers tap offset (px right of like button)</label>
+                            <div class="btn-row" style="align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                                <input type="number" id="debug-likers-tap-offset" class="ga-input" style="max-width: 6rem;" min="0" max="500" step="1" value="15" autocomplete="off" oninput="onDebugLikersOffsetChange()">
+                                <button type="button" class="btn-ghost btn-sm" onclick="runLikersTapTest()">Test likers tap</button>
+                            </div>
+                            <p class="text-xs text-muted-foreground mt-1">Be on an open feed post first. Finds row_feed_button_like, taps this many pixels to the right. If there is no number beside the heart, the owner hid likes and likers cannot be opened.</p>
+                        </div>
+                        <div class="field" id="debug-fullscreen-likers-field">
+                            <label for="debug-likers-tap-offset-y">Fullscreen likers tap offset (px below like button)</label>
+                            <div class="btn-row" style="align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                                <input type="number" id="debug-likers-tap-offset-y" class="ga-input" style="max-width: 6rem;" min="0" max="500" step="1" value="15" autocomplete="off" oninput="onDebugLikersOffsetYChange()">
+                                <button type="button" class="btn-ghost btn-sm" onclick="runFullscreenLikersTapTest()">Test fullscreen likers tap</button>
+                            </div>
+                            <div class="btn-row" style="align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem;">
+                                <button type="button" class="btn-ghost btn-sm" onclick="runFullscreenDetectTest()">Detect fullscreen</button>
+                                <button type="button" class="btn-ghost btn-sm" onclick="runFullscreenRevealLikesTest()">Reveal hidden likes</button>
+                            </div>
+                            <p class="text-xs text-muted-foreground mt-1">Be on a playing video first. A like button on the right side of the screen means fullscreen. In fullscreen the count sits below the heart, so this taps that many pixels down. If the word “likes” shows under the heart, the owner hid the count — “Reveal hidden likes” taps it to expose the number first.</p>
+                        </div>
+                        <div class="field" id="debug-reel-comment-field">
+                            <label>Reel comment (after like)</label>
+                            <div class="btn-row" style="align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                                <button type="button" class="btn-ghost btn-sm" onclick="runFullscreenLikeStayTest()">1. Like &amp; stay in reel</button>
+                                <button type="button" class="btn-ghost btn-sm" onclick="runFullscreenDetectCommentTest()">2. Detect comment</button>
+                                <button type="button" class="btn-ghost btn-sm" onclick="runFullscreenOpenCommentsTest()">3. Open comments</button>
+                                <button type="button" class="btn-ghost btn-sm" onclick="runFullscreenSendCommentTest()">4. Send comment</button>
+                            </div>
+                            <p class="text-xs text-muted-foreground mt-1">Open a profile video/reel in fullscreen first (like button on the right). Step 4 needs a test message below. Or switch debug flow to <strong>Reel comment</strong> for the same four steps in the pipeline list.</p>
+                        </div>
+                        <div class="field" id="debug-inline-post-video-field">
+                            <label>Profile Posts inline video (new format)</label>
+                            <div class="btn-row" style="align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                                <button type="button" class="btn-ghost btn-sm" onclick="runInlinePostDetectTest()">1. Detect inline video</button>
+                                <button type="button" class="btn-ghost btn-sm" onclick="runInlinePostLikeTest()">2. Like inline video</button>
+                                <button type="button" class="btn-ghost btn-sm" onclick="runInlinePostOpenCommentsTest()">3. Open comments</button>
+                                <button type="button" class="btn-ghost btn-sm" onclick="runInlinePostSendCommentTest()">4. Send comment</button>
+                            </div>
+                            <p class="text-xs text-muted-foreground mt-1">Profile grid → open a video post (header says <strong>Posts</strong>, heart row below media — not reel fullscreen). Step 4 needs test message. Or use debug flow <strong>Profile post video</strong>.</p>
+                        </div>
+                        <div class="field" id="debug-post-reel-field">
+                            <label for="debug-post-reel-count">Reels to post (full-session debug step)</label>
+                            <input type="number" id="debug-post-reel-count" class="ga-input" style="max-width: 6rem;" min="1" max="20" step="1" value="1" autocomplete="off" oninput="onDebugPostReelCountChange()">
+                            <p class="text-xs text-muted-foreground mt-1">Used by <strong>Reel → full post loop</strong> debug test. Production always posts 1 reel per session when <strong>post-reels</strong> is set on Jobs.</p>
+                        </div>
+                        <div class="field" id="debug-unfollow-list-field">
+                            <p class="text-xs text-muted-foreground">Unfollow steps (72–73) use the first username in your account’s <strong>unfollow list</strong> (Lists tab). They search your Following list for that user — not the first row. Whitelist users are blocked.</p>
+                        </div>
+                        <div class="field" id="debug-remove-list-field">
+                            <p class="text-xs text-muted-foreground">Remove steps (78–80) use the first username in your account’s <strong>remove list</strong> (Lists tab). They search your Followers list for that user — not the debug target field.</p>
+                        </div>
+                        <div class="field" id="debug-telegram-field">
+                            <div class="btn-row" style="align-items: center; gap: 0.5rem; flex-wrap: wrap;">
+                                <button type="button" class="btn-ghost btn-sm" onclick="runTelegramTest()">Send Telegram test</button>
+                            </div>
+                            <p class="text-xs text-muted-foreground mt-1">Set <strong>telegram-api-token</strong> and <strong>telegram-chat-id</strong> in the account Reports tab (<code>telegram.yml</code>). Message @BotFather for a token, @myidbot for your chat ID, then /start your bot before testing.</p>
+                        </div>
+                    </section>
+
+                    <section class="tools-section" id="debug-detail-panel">
+                        <h2 class="tools-section-title">What the bot is looking for</h2>
+                        <p id="debug-detail-title" class="text-sm font-medium text-foreground">Select a pipeline step above</p>
+                        <p id="debug-detail-state" class="debug-detail-state text-xs text-muted-foreground mt-1"></p>
+                        <pre id="debug-detail-detects" class="debug-detail-detects mt-3 hidden" aria-label="Element selectors for this step"></pre>
+                        <pre id="debug-detail-result" class="debug-detail-result mt-3 hidden" aria-label="Step result"></pre>
+                    </section>
+
+                    <section class="tools-section debug-live-log-panel">
+                        <div class="debug-live-log-header">
+                            <h2 class="tools-section-title">Live debug log</h2>
+                            <div class="btn-row">
+                                <button type="button" class="btn-ghost btn-sm" id="btn-debug-log-autoscroll" onclick="toggleDebugLogAutoscroll()">Auto-scroll</button>
+                                <button type="button" class="btn-ghost btn-sm" onclick="clearDebugTerminal()">Clear</button>
+                            </div>
+                        </div>
+                        <p class="text-xs text-muted-foreground">Streams GramAddict logs while a debug step runs — use this to see waits, taps, and timing.</p>
+                        <pre id="debug-live-log" class="debug-live-log" aria-live="polite">Run a debug step to see live output here…</pre>
+                    </section>
+                    </div>
+
+                    <div id="account-files-panel" class="sr-only" aria-hidden="true" hidden>
+                        <select id="adv-file-select" class="ga-input" onchange="onAdvFileChange()"></select>
+                        <textarea id="adv-file-content" class="ga-input ga-raw-yaml" rows="14" spellcheck="false"></textarea>
+                        <p id="adv-file-status"></p>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script>window.__DEBUG_GROUP_COUNTS__ = __DEBUG_BOOTSTRAP__;</script>
+    <script src="/static/dashboard.js?v=43"></script>
+</body>
+</html>

@@ -111,8 +111,13 @@ def nav_to_post_likers(device, username, my_username):
         logger.info(f"{private_empty} account.", extra={"color": f"{Fore.GREEN}"})
         return False
     logger.info(f"Opening the first post of {username}.")
-    ProfileView(device).swipe_to_fit_posts()
-    PostsGridView(device).navigateToPost(0, 0)
+    grid_view = PostsGridView(device)
+    if not grid_view.is_post_tappable(0, 0):
+        ProfileView(device).swipe_to_fit_posts()
+    opened, _, _ = grid_view.navigateToPost(0, 0)
+    if opened is None:
+        logger.warning(f"Could not open first post of {username}.")
+        return False
     return True
 
 
