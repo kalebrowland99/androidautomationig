@@ -6,6 +6,8 @@ skip_following: true
 skip_follower: true
 skip_if_link_in_bio: false
 follow_private_or_empty: false
+ignore_following_count: true
+ignore_potency: true
 min_followers: 50
 max_followers: 30000
 min_followings: 50

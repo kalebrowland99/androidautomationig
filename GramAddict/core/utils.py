@@ -568,7 +568,7 @@ def stop_bot(device, sessions, session_state, was_sleeping=False):
         kill_atx_agent(device)
     head_up_notifications(enabled=True)
     logger.info(
-        f"-------- FINISH: {datetime.now().strftime('%H:%M:%S')} --------",
+        f"-------- FINISH: {datetime.now().strftime('%I:%M:%S %p')} --------",
         extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
     )
     if session_state is not None:
@@ -748,7 +748,7 @@ def wait_for_next_session(time_left, session_state, sessions, device):
     if args.kill_atx_agent:
         kill_atx_agent(device)
     logger.info(
-        f'Next session will start at: {(datetime.now()+ time_left).strftime("%H:%M:%S (%Y/%m/%d)")}.',
+        f'Next session will start at: {(datetime.now()+ time_left).strftime("%I:%M:%S %p (%Y/%m/%d)")}.',
         extra={"color": f"{Fore.GREEN}"},
     )
     logger.info(

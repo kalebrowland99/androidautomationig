@@ -38,6 +38,15 @@ EDITABLE_FIELDS: dict[str, list[dict[str, Any]]] = {
     "actions": [
         {"key": "post-reels", "label": "Post Reels (videos in queue)", "type": "text", "placeholder": "3"},
         {"key": "feed", "label": "Like posts on your home feed", "type": "text", "placeholder": "3"},
+        {
+            "key": "daily-story-likes",
+            "label": "Daily story likes",
+            "type": "inline-file-job",
+            "file": "story_likes.txt",
+            "placeholder": "username",
+            "limit_placeholder": "20-30",
+            "enable_checkbox": True,
+        },
         {"key": "blogger", "label": "Visit these accounts", "type": "lines", "placeholder": "username"},
         {"key": "blogger-followers", "label": "Visit followers of these accounts", "type": "lines", "placeholder": "username"},
         {"key": "blogger-following", "label": "Visit who these accounts follow", "type": "lines", "placeholder": "username"},
@@ -105,6 +114,7 @@ EDITABLE_FIELDS: dict[str, list[dict[str, Any]]] = {
         {"key": "follow-limit", "label": "Max follows per target", "type": "text", "default": "50"},
         {"key": "skipped-list-limit", "label": "Scrolls before skipping a target", "type": "text", "default": "10-15"},
         {"key": "skipped-posts-limit", "label": "Already-liked posts to skip", "type": "text", "default": "5"},
+        {"key": "skip-top-profile-posts", "label": "Skip first N posts on profile grid", "type": "text", "default": "3"},
         {"key": "fling-when-skipped", "label": "Fast-scroll after skips", "type": "text", "default": "0"},
         {"key": "min-following", "label": "Only visit people following at least…", "type": "text", "default": "100"},
     ],

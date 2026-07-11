@@ -15,6 +15,10 @@ FILTER_FIELDS: dict[str, list[dict[str, Any]]] = {
         {"key": "skip_if_link_in_bio", "label": "Skip if bio has a link", "type": "bool"},
         {"key": "follow_private_or_empty", "label": "Only follow private or empty-bio accounts", "type": "bool"},
     ],
+    "profile_stats_options": [
+        {"key": "ignore_following_count", "label": "Ignore following count", "type": "bool"},
+        {"key": "ignore_potency", "label": "Ignore follower ratio (potency)", "type": "bool"},
+    ],
     "profile_stats": [
         {"key": "min_followers", "label": "Minimum followers", "type": "text", "default": "50"},
         {"key": "max_followers", "label": "Maximum followers", "type": "text", "default": "2500"},
@@ -59,6 +63,7 @@ FILTER_FIELDS: dict[str, list[dict[str, Any]]] = {
 
 FILTER_SECTION_LABELS = {
     "profile_type": "What kind of account",
+    "profile_stats_options": "Quick skips",
     "profile_stats": "Follower & post counts",
     "biography": "Bio & name rules",
     "comment_filters": "Where comments are allowed",
@@ -69,11 +74,22 @@ FILTER_SECTION_LABELS = {
 TELEGRAM_FIELDS: list[dict[str, Any]] = [
     {"key": "telegram-api-token", "label": "Bot token", "type": "text", "placeholder": "From @BotFather on Telegram"},
     {"key": "telegram-chat-id", "label": "Your chat ID", "type": "text", "placeholder": "From @myidbot on Telegram"},
+    {
+        "key": "telegram-status-commands",
+        "label": "Allow Telegram status commands",
+        "type": "bool",
+    },
+    {
+        "key": "telegram-alerts",
+        "label": "Telegram alerts on blocks and errors",
+        "type": "bool",
+    },
 ]
 
 ACCOUNT_LIST_FILES = {
     "whitelist.txt": "Always allow these usernames",
     "blacklist.txt": "Never interact with these usernames",
+    "story_likes.txt": "Daily story likes — accounts to check for new stories",
     "unfollow_list.txt": "Usernames to unfollow",
     "remove_list.txt": "Followers to remove",
 }
@@ -96,6 +112,12 @@ ACCOUNT_BUNDLE: list[dict[str, str]] = [
         "label": "Profile filters",
         "tab": "filters",
         "description": "Who to skip based on followers, bio, business account, and more.",
+    },
+    {
+        "name": "story_likes.txt",
+        "label": "Daily story likes list",
+        "tab": "lists",
+        "description": "Accounts to visit daily — like all segments in any new story.",
     },
     {
         "name": "whitelist.txt",

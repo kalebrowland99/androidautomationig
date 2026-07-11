@@ -1994,6 +1994,44 @@ body.brand-labely .phones-td-warmup {
   max-width: 28rem;
 }
 
+.farm-batch-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.25rem;
+  margin: -0.75rem 0 1.5rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: 1rem;
+  background: hsl(var(--muted) / 0.35);
+}
+
+.farm-batch-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0;
+  font-size: 0.8125rem;
+}
+
+.farm-batch-mode-label {
+  color: hsl(var(--muted-foreground));
+  white-space: nowrap;
+}
+
+.farm-run-mode-select {
+  min-width: 11rem;
+  font-size: 0.8125rem;
+}
+
+.farm-batch-hint {
+  margin: 0;
+  flex: 1 1 16rem;
+  font-size: 0.75rem;
+  color: hsl(var(--muted-foreground));
+  line-height: 1.4;
+}
+
 .ctx-est-stats {
   display: flex;
   flex-wrap: wrap;
@@ -2512,6 +2550,39 @@ body.brand-labely .phones-td-warmup {
 
 .inline-file-limit {
   max-width: 14rem;
+}
+
+.inline-file-job-header {
+  margin-bottom: 0.25rem;
+}
+
+.inline-file-enable {
+  margin: 0;
+}
+
+.inline-file-job-field.inline-file-job-disabled .inline-file-hint,
+.inline-file-job-field.inline-file-job-disabled textarea,
+.inline-file-job-field.inline-file-job-disabled .inline-file-limit-row {
+  opacity: 0.55;
+}
+
+.inline-file-job-field.inline-file-job-disabled textarea,
+.inline-file-job-field.inline-file-job-disabled .inline-file-limit {
+  cursor: not-allowed;
+  background: #f8fafc;
+}
+
+.post-reels-field.post-reels-locked .post-reels-count {
+  opacity: 0.65;
+  cursor: not-allowed;
+  background: #f8fafc;
+}
+
+.post-reels-lock-note {
+  margin: 0.5rem 0 0;
+  font-size: 0.8125rem;
+  color: #b45309;
+  line-height: 1.4;
 }
 
 .post-reels-row {

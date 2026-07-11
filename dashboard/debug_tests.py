@@ -214,8 +214,10 @@ DebugKind = Literal[
     "ig_profile_open_account_menu",
     "ig_account_switch_user",
     "ig_profile_detect_story_ring",
+    "ig_profile_skip_top_posts",
     "ig_profile_open_stories",
     "ig_story_detect_like",
+    "ig_daily_story_likes",
     "ig_search_open_hashtag",
     "ig_nav_hashtag_top",
     "ig_nav_hashtag_recent",
@@ -405,8 +407,10 @@ DEBUG_GROUP_ORDER: dict[str, list[str]] = {
         "ig-profile-open-account-menu",
         "ig-account-switch-user",
         "ig-profile-detect-story-ring",
+        "ig-profile-skip-top-posts",
         "ig-profile-open-stories",
         "ig-story-detect-like",
+        "ig-daily-story-likes",
         "ig-back-from-stories",
         "ig-search-open-user",
         "ig-profile-detect-follow",
@@ -667,6 +671,11 @@ DEBUG_TESTS: dict[str, DebugTest] = {
         "label": "Profile → detect story ring",
         "kind": "ig_profile_detect_story_ring",
     },
+    "ig-profile-skip-top-posts": {
+        "label": "Profile → skip top grid posts",
+        "kind": "ig_profile_skip_top_posts",
+        "needs_username": True,
+    },
     "ig-profile-open-stories": {
         "label": "Profile → open stories",
         "kind": "ig_profile_open_stories",
@@ -674,6 +683,11 @@ DEBUG_TESTS: dict[str, DebugTest] = {
     "ig-story-detect-like": {
         "label": "Story → detect like button",
         "kind": "ig_story_detect_like",
+    },
+    "ig-daily-story-likes": {
+        "label": "[Production] daily story likes (one account)",
+        "kind": "ig_daily_story_likes",
+        "needs_username": True,
     },
     "ig-back-from-stories": {
         "label": "Press back (from stories)",
@@ -775,7 +789,7 @@ DEBUG_TESTS: dict[str, DebugTest] = {
         "kind": "ig_feed_swipe",
     },
     "ig-bpl-production-nav": {
-        "label": "[Production] nav_to_post_likers → open first grid post",
+        "label": "[Production] nav_to_post_likers → open first post after top skip",
         "kind": "ig_bpl_production_nav",
         "needs_username": True,
     },
@@ -1116,7 +1130,7 @@ DEBUG_KIND_DETECTS: dict[str, str] = {
     "ig_nav_blogger_followers": "TabBar → Search → open @user profile → navigateToFollowers()",
     "ig_nav_blogger_following": "TabBar → Search → open @user profile → navigateToFollowing()",
     "ig_nav_post_likers": (
-        "Search or Profile → first post → tap likers row → username list\n"
+        "Search or Profile → first post after skip-top-profile-posts → tap likers row\n"
         f"{IG}/row_feed_textview_likes or {IG}/row_feed_like_count_facepile_stub"
     ),
     "ig_export_crash": "save_crash() — dumps UI hierarchy to GramAddict crashes folder",
@@ -1143,11 +1157,22 @@ DEBUG_KIND_DETECTS: dict[str, str] = {
         f"{IG}/row_user_textview textMatches @username (with or without @)"
     ),
     "ig_profile_detect_story_ring": f"{IG}/reel_ring on profile header",
+    "ig_profile_skip_top_posts": (
+        "PostsGridView on profile grid:\n"
+        "  · should_skip_cell(row, col, skip-top-profile-posts)\n"
+        "  · open_first_post_after_skip(skip-top-profile-posts)"
+    ),
     "ig_profile_open_stories": (
         f"{IG}/reel_ring (tap)\n"
         f"Then {IG}/reel_viewer_media_container OR {IG}/reel_viewer_title"
     ),
     "ig_story_detect_like": f"{IG}/toolbar_like_button",
+    "ig_daily_story_likes": (
+        "handle_daily_story_likes_from_file flow for one @username:\n"
+        "  · Search → profile\n"
+        "  · has_unviewed_story()\n"
+        "  · like_all_profile_stories(require_unviewed=True)"
+    ),
     "ig_story_tap_like": f"{IG}/toolbar_like_button (tap)",
     "ig_search_open_hashtag": (
         f"SearchView.navigate_to_target(#tag, hashtag-posts-top)\n"
@@ -1200,10 +1225,9 @@ DEBUG_KIND_DETECTS: dict[str, str] = {
     ),
     "ig_feed_swipe": "Pull-to-refresh swipe UP (UniversalActions._swipe_points)",
     "ig_bpl_production_nav": (
-        "Production nav_to_post_likers(device, @user, my_username):\n"
+        "Production nav_to_post_likers(device, @user, my_username, skip_top_profile_posts):\n"
         "  · Search → profile (or own profile tab)\n"
-        "  · PostsGridView.is_post_tappable → swipe profile only if needed\n"
-        "  · PostsGridView.navigateToPost(0, 0)"
+        "  · PostsGridView.open_first_post_after_skip(skip-top-profile-posts)"
     ),
     "ig_bpl_production_check_post": (
         "Production PostsViewList._check_if_last_post('', blogger-post-likers)\n"
@@ -1599,6 +1623,22 @@ def _account_for_device_or_fail(
             target="Trying to detect:\n  · Assign this phone to an account on the Farm tab",
         )
     return account_id, None
+
+
+def _skip_top_profile_posts_for_serial(serial: str, device: DeviceFacade, test_id: str) -> int:
+    from GramAddict.core.utils import get_value
+    from dashboard.gramaddict_config import get_account
+
+    account_id, err = _account_for_device_or_fail(serial, device, test_id)
+    if err:
+        return 3
+    form = get_account(account_id or "").get("form") or {}
+    raw = str(
+        form.get("skip-top-profile-posts")
+        or form.get("skip-pinned-posts")
+        or "3"
+    ).strip() or "3"
+    return max(0, int(get_value(raw, None, 3) or 3))
 
 
 def _search_followers_list(device: DeviceFacade, username: str) -> bool:
@@ -2537,13 +2577,16 @@ def run_debug_test(
     if kind == "ig_nav_post_likers":
         username = _require_target(target_username)
         my_username = _require_device_username(serial)
-        if not nav_to_post_likers(device, username, my_username):
+        skip_top = _skip_top_profile_posts_for_serial(serial, device, test_id)
+        if not nav_to_post_likers(
+            device, username, my_username, skip_top_profile_posts=skip_top
+        ):
             return _fail(
                 serial,
                 device,
                 test_id,
-                f"Could not open first post for @{username}",
-                target="Trying to detect:\n  · Search or Profile → posts grid → first post",
+                f"Could not open first post after skip for @{username}",
+                target="Trying to detect:\n  · Search or Profile → posts grid → first post after top skip",
             )
         count, err = _open_post_likers_list(
             device,
@@ -2736,6 +2779,47 @@ def run_debug_test(
             return {"success": True, "message": "Story ring found", "test_id": test_id}
         return _fail(serial, device, test_id, "No story ring on profile", target='Trying to detect:\n  · REEL_RING on profile header')
 
+    if kind == "ig_profile_skip_top_posts":
+        from GramAddict.core.views import PostsGridView, ProfileView, TabBarView
+
+        username = _require_target(target_username)
+        search_view = TabBarView(device).navigateToSearch()
+        if not search_view.navigate_to_target(username, "account"):
+            return _fail(
+                serial,
+                device,
+                test_id,
+                f"Could not open @{username}",
+                target="Trying to detect:\n  · Search → profile",
+            )
+        skip_top = _skip_top_profile_posts_for_serial(serial, device, test_id)
+        grid = PostsGridView(device)
+        if not grid.is_post_tappable(0, 0):
+            ProfileView(device).swipe_to_fit_posts()
+        lines: list[str] = [f"skip-top-profile-posts={skip_top}"]
+        for row in range(3):
+            for col in range(3):
+                if not grid.is_post_tappable(row, col):
+                    continue
+                skip_cell = grid.should_skip_cell(row, col, skip_top)
+                lines.append(f"row {row + 1} col {col + 1}: skip={skip_cell}")
+        opened, _, _ = grid.open_first_post_after_skip(skip_top)
+        if opened is None:
+            return _fail(
+                serial,
+                device,
+                test_id,
+                "No post found after skipping top grid slots",
+                target=DEBUG_KIND_DETECTS["ig_profile_skip_top_posts"],
+            )
+        device.back()
+        random_sleep(0.5, 1, modulable=False)
+        return {
+            "success": True,
+            "message": "; ".join(lines),
+            "test_id": test_id,
+        }
+
     if kind == "ig_profile_open_stories":
         profile = ProfileView(device, is_own_profile=False)
         ring = profile.StoryRing()
@@ -2762,6 +2846,60 @@ def run_debug_test(
         return {
             "success": True,
             "message": f"Story like button found ({state})",
+            "test_id": test_id,
+        }
+
+    if kind == "ig_daily_story_likes":
+        from GramAddict.core import utils as ga_utils
+        from GramAddict.core.interaction import like_all_profile_stories
+        from GramAddict.core.session_state import SessionState
+        from GramAddict.core.views import ProfileView, TabBarView
+        from types import SimpleNamespace
+
+        username = _require_target(target_username)
+        search_view = TabBarView(device).navigateToSearch()
+        if not search_view.navigate_to_target(username, "daily-story-likes"):
+            return _fail(
+                serial,
+                device,
+                test_id,
+                f"Could not open @{username}",
+                target="Trying to detect:\n  · Search → profile",
+            )
+        profile_view = ProfileView(device, is_own_profile=False)
+        if not profile_view.has_unviewed_story():
+            device.back()
+            return {
+                "success": True,
+                "message": f"@{username} has no new story — skip (production behavior)",
+                "test_id": test_id,
+            }
+        stories_count = "1-1"
+        account_id, err = _account_for_device_or_fail(serial, device, test_id)
+        if not err and account_id:
+            from dashboard.gramaddict_config import get_account
+
+            form = get_account(account_id).get("form") or {}
+            stories_count = str(form.get("stories-count") or stories_count)
+        args = SimpleNamespace(
+            stories_count=stories_count,
+            **{k: getattr(ga_utils.args, k, None) for k in ("dont_type", "app_id")},
+        )
+        ga_utils.args = args
+        session_state = SessionState(SimpleNamespace(args=args))
+        liked = like_all_profile_stories(
+            device,
+            profile_view,
+            username,
+            args,
+            session_state,
+            require_unviewed=True,
+        )
+        device.back()
+        random_sleep(0.5, 1, modulable=False)
+        return {
+            "success": True,
+            "message": f"@{username}: liked {liked} story segment(s)",
             "test_id": test_id,
         }
 
@@ -4533,7 +4671,10 @@ def run_debug_test(
 
         if kind in ("ig_bpl_production_nav", "ig_bpl_production_full"):
             _step("nav_to_post_likers…")
-            if not nav_to_post_likers(device, username, my_username):
+            skip_top = _skip_top_profile_posts_for_serial(serial, device, test_id)
+            if not nav_to_post_likers(
+                device, username, my_username, skip_top_profile_posts=skip_top
+            ):
                 return _fail(
                     serial,
                     device,

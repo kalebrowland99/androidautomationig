@@ -33,6 +33,8 @@ FIELD_MIN_FOLLOWERS = "min_followers"
 FIELD_MAX_FOLLOWERS = "max_followers"
 FIELD_MIN_FOLLOWINGS = "min_followings"
 FIELD_MAX_FOLLOWINGS = "max_followings"
+FIELD_IGNORE_FOLLOWING_COUNT = "ignore_following_count"
+FIELD_IGNORE_POTENCY = "ignore_potency"
 FIELD_MIN_POTENCY_RATIO = "min_potency_ratio"
 FIELD_MAX_POTENCY_RATIO = "max_potency_ratio"
 FIELD_FOLLOW_PRIVATE_OR_EMPTY = "follow_private_or_empty"
@@ -221,6 +223,10 @@ class Filter:
             field_max_followers = self.conditions.get(FIELD_MAX_FOLLOWERS)
             field_min_followings = self.conditions.get(FIELD_MIN_FOLLOWINGS)
             field_max_followings = self.conditions.get(FIELD_MAX_FOLLOWINGS)
+            field_ignore_following_count = self.conditions.get(
+                FIELD_IGNORE_FOLLOWING_COUNT, False
+            )
+            field_ignore_potency = self.conditions.get(FIELD_IGNORE_POTENCY, False)
             field_min_potency_ratio = self.conditions.get(FIELD_MIN_POTENCY_RATIO, 0)
             field_max_potency_ratio = self.conditions.get(FIELD_MAX_POTENCY_RATIO, 999)
             field_blacklist_words = self.conditions.get(FIELD_BLACKLIST_WORDS, [])
@@ -333,7 +339,7 @@ class Filter:
             return profile_data, self.return_check_profile(
                 username, profile_data, SkipReason.GT_FOLLOWERS
             )
-        if field_min_followings is not None and profile_data.followings < int(
+        if not field_ignore_following_count and field_min_followings is not None and profile_data.followings < int(
             field_min_followings
         ):
             logger.info(
@@ -343,7 +349,7 @@ class Filter:
             return profile_data, self.return_check_profile(
                 username, profile_data, SkipReason.LT_FOLLOWINGS
             )
-        if field_max_followings is not None and profile_data.followings > int(
+        if not field_ignore_following_count and field_max_followings is not None and profile_data.followings > int(
             field_max_followings
         ):
             logger.info(
@@ -354,7 +360,7 @@ class Filter:
                 username, profile_data, SkipReason.GT_FOLLOWINGS
             )
 
-        if (field_min_potency_ratio != 0 or field_max_potency_ratio != 999) and (
+        if not field_ignore_potency and (field_min_potency_ratio != 0 or field_max_potency_ratio != 999) and (
             (
                 int(profile_data.followings) == 0
                 or profile_data.followers / profile_data.followings

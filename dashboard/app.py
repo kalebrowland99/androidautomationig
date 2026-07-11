@@ -13,8 +13,9 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from dashboard import account_templates, brand_pools, debug_log, device_service, follow_vision_config, gramaddict_config, post_reel_config, weditor_service
+from dashboard import account_templates, brand_pools, debug_log, device_service, follow_vision_config, gramaddict_config, post_reel_config, telegram_commands, weditor_service
 from dashboard.session_estimate import estimate_session
+from GramAddict.core.account_safety import is_autopost_locked
 from GramAddict.core.post_reel_account import load_post_reel_state
 from dashboard.debug_tests import (
     DEBUG_GROUP_ORDER,
@@ -40,7 +41,9 @@ async def _lifespan(_app: FastAPI):
         await asyncio.to_thread(weditor_service.ensure_running)
     except Exception as exc:
         print(f"Warning: Weditor did not start: {exc}")
+    await asyncio.to_thread(telegram_commands.telegram_command_service.start)
     yield
+    await asyncio.to_thread(telegram_commands.telegram_command_service.stop)
     debug_log.set_broadcast(None)
     await asyncio.to_thread(weditor_service.stop)
 
@@ -789,6 +792,20 @@ async def api_gramaddict_save_post_reel_prompts(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+def _reject_autopost_media(account_id: str) -> None:
+    folder = gramaddict_config.ACCOUNTS_DIR / account_id
+    config_path = folder / "config.yml"
+    username = ""
+    if config_path.is_file():
+        data = gramaddict_config._load_yaml(config_path)
+        username = str(data.get("username") or "")
+    if is_autopost_locked(account_id, username):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Reel uploads are locked for @{username or account_id} (autopost safety).",
+        )
+
+
 @app.get("/api/gramaddict/accounts/{account_id}/post-reel/media")
 async def api_gramaddict_list_post_media(account_id: str) -> dict[str, Any]:
     try:
@@ -806,6 +823,7 @@ async def api_gramaddict_upload_post_media(
     file: UploadFile = File(...),
 ) -> dict[str, Any]:
     try:
+        _reject_autopost_media(account_id)
         if not file.filename:
             raise HTTPException(status_code=400, detail="Filename is required")
         suffix = Path(file.filename).suffix.lower()
@@ -830,6 +848,7 @@ async def api_gramaddict_upload_post_media(
 @app.delete("/api/gramaddict/accounts/{account_id}/post-reel/media/{filename}")
 async def api_gramaddict_delete_post_media(account_id: str, filename: str) -> dict[str, Any]:
     try:
+        _reject_autopost_media(account_id)
         post_reel_config.delete_post_media_file(account_id, filename)
         return {"ok": True, "files": post_reel_config.list_post_media_files(account_id)}
     except FileNotFoundError as exc:

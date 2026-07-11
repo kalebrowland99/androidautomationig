@@ -8,6 +8,7 @@ from atomicwrites import atomic_write
 from colorama import Fore
 
 from GramAddict.core.device_facade import Direction, Timeout
+from GramAddict.core.interaction import like_all_profile_stories
 from GramAddict.core.navigation import (
     nav_to_blogger,
     nav_to_feed,
@@ -255,7 +256,7 @@ def handle_blogger(
                 interacted_when, get_value(self.args.can_reinteract_after, None, 0)
             )
             logger.info(
-                f"@{blogger}: already interacted on {interacted_when:%Y/%m/%d %H:%M:%S}. {'Interacting again now' if can_reinteract else 'Skip'}."
+                f"@{blogger}: already interacted on {interacted_when:%Y/%m/%d %I:%M:%S %p}. {'Interacting again now' if can_reinteract else 'Skip'}."
             )
             if can_reinteract:
                 can_interact = True
@@ -356,7 +357,7 @@ def handle_blogger_from_file(
                                 get_value(self.args.can_reinteract_after, None, 0),
                             )
                             logger.info(
-                                f"@{username}: already interacted on {interacted_when:%Y/%m/%d %H:%M:%S}. {'Interacting again now' if can_reinteract else 'Skip'}."
+                                f"@{username}: already interacted on {interacted_when:%Y/%m/%d %I:%M:%S %p}. {'Interacting again now' if can_reinteract else 'Skip'}."
                             )
                             if can_reinteract:
                                 can_interact = True
@@ -413,6 +414,112 @@ def handle_blogger_from_file(
     device.back()
 
 
+def handle_daily_story_likes_from_file(self, device, parameter_passed, storage):
+    """Visit each username in the list and like all new stories."""
+    current_job = "daily-story-likes"
+    need_to_refresh = True
+
+    filename: str = os.path.join(storage.account_path, parameter_passed.split(" ")[0])
+    try:
+        amount_of_users = get_value(parameter_passed.split(" ")[1], None, 10)
+    except IndexError:
+        amount_of_users = 10
+        logger.warning(
+            f"You didn't pass how many users should be processed from the list! Default is {amount_of_users} users."
+        )
+    if not path.isfile(filename):
+        logger.warning(
+            f"File {filename} not found. You have to specify the right relative path from this point: {os.getcwd()}"
+        )
+        return
+
+    with open(filename, "r", encoding="utf-8") as f:
+        usernames = [line.replace(" ", "") for line in f if line.strip() and not line.strip().startswith("#")]
+    len_usernames = len(usernames)
+    if len_usernames < amount_of_users:
+        amount_of_users = len_usernames
+    logger.info(
+        f"Daily story likes: {len_usernames} entries in {filename}, processing up to {amount_of_users}."
+    )
+    if amount_of_users <= 0:
+        logger.info("Daily story likes limit is 0 — skipping.")
+        return
+
+    not_found = []
+    processed_users = 0
+    reinteract_hours = get_value(self.args.can_reinteract_after, None, 24)
+
+    try:
+        for line, username_raw in enumerate(usernames, start=1):
+            username = username_raw.strip().lstrip("@")
+            if not username:
+                continue
+
+            if storage.is_user_in_blacklist(username):
+                logger.info(f"@{username} is in blacklist. Skip.")
+                continue
+
+            interacted, interacted_when = storage.check_user_was_interacted(username)
+            if interacted:
+                can_reinteract = storage.can_be_reinteract(interacted_when, reinteract_hours)
+                logger.info(
+                    f"@{username}: last story check {interacted_when:%Y/%m/%d %I:%M:%S %p}. "
+                    f"{'Checking again now' if can_reinteract else 'Skip (already checked today)'}"
+                )
+                if not can_reinteract:
+                    continue
+
+            if need_to_refresh:
+                search_view = TabBarView(device).navigateToSearch()
+            if not search_view.navigate_to_target(username, current_job):
+                not_found.append(username_raw)
+                need_to_refresh = True
+                continue
+            need_to_refresh = False
+
+            profile_view = ProfileView(device, is_own_profile=False)
+            liked = like_all_profile_stories(
+                device,
+                profile_view,
+                username,
+                self.args,
+                self.session_state,
+                require_unviewed=True,
+            )
+            storage.add_interacted_user(username, self.session_state.id)
+            if liked:
+                logger.info(
+                    f"@{username}: liked {liked} story segment(s).",
+                    extra={"color": f"{Fore.GREEN}"},
+                )
+            device.back()
+            processed_users += 1
+
+            if self.session_state.check_limit(
+                limit_type=self.session_state.Limit.WATCHES
+            ):
+                logger.info("Story watch limit reached.")
+                break
+            if processed_users >= amount_of_users:
+                logger.info(
+                    f"{processed_users} accounts checked for stories — next job."
+                )
+                break
+    finally:
+        if not_found:
+            with open(
+                f"{os.path.splitext(filename)[0]}_not_found.txt",
+                mode="a+",
+                encoding="utf-8",
+            ) as f:
+                f.writelines(not_found)
+        if self.args.delete_interacted_users and len_usernames != 0:
+            with atomic_write(filename, overwrite=True, encoding="utf-8") as f:
+                f.writelines(usernames[line:])
+
+    logger.info(f"Daily story likes from {filename} completed.")
+
+
 def do_unfollow_from_list(device, username, on_following_list):
     if not on_following_list:
         ProfileView(device).click_on_avatar()
@@ -439,9 +546,24 @@ def handle_likers(
     interaction,
     is_follow_limit_reached,
 ):
+    skip_top = max(
+        0,
+        int(
+            get_value(
+                getattr(self.args, "skip_top_profile_posts", None)
+                or getattr(self.args, "skip_pinned_posts", None)
+                or "3",
+                None,
+                3,
+            )
+            or 0
+        ),
+    )
     if (
         current_job == "blogger-post-likers"
-        and not nav_to_post_likers(device, target, session_state.my_username)
+        and not nav_to_post_likers(
+            device, target, session_state.my_username, skip_top_profile_posts=skip_top
+        )
         or current_job != "blogger-post-likers"
         and not nav_to_hashtag_or_place(device, target, current_job)
     ):
@@ -540,7 +662,7 @@ def handle_likers(
                                 get_value(self.args.can_reinteract_after, None, 0),
                             )
                             logger.info(
-                                f"@{username}: already interacted on {interacted_when:%Y/%m/%d %H:%M:%S}. {'Interacting again now' if can_reinteract else 'Skip'}."
+                                f"@{username}: already interacted on {interacted_when:%Y/%m/%d %I:%M:%S %p}. {'Interacting again now' if can_reinteract else 'Skip'}."
                             )
                             if can_reinteract:
                                 can_interact = True
@@ -741,7 +863,7 @@ def handle_posts(
                                 get_value(self.args.can_reinteract_after, None, 0),
                             )
                             logger.info(
-                                f"@{username}: already interacted on {interacted_when:%Y/%m/%d %H:%M:%S}. {'Interacting again now' if can_reinteract else 'Skip'}."
+                                f"@{username}: already interacted on {interacted_when:%Y/%m/%d %I:%M:%S %p}. {'Interacting again now' if can_reinteract else 'Skip'}."
                             )
                             if can_reinteract:
                                 can_interact = True
@@ -964,7 +1086,7 @@ def iterate_over_followers(
                             get_value(self.args.can_reinteract_after, None, 0),
                         )
                         logger.info(
-                            f"@{username}: already interacted on {interacted_when:%Y/%m/%d %H:%M:%S}. {'Interacting again now' if can_reinteract else 'Skip'}."
+                            f"@{username}: already interacted on {interacted_when:%Y/%m/%d %I:%M:%S %p}. {'Interacting again now' if can_reinteract else 'Skip'}."
                         )
                         if can_reinteract:
                             can_interact = True

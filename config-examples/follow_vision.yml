@@ -1,6 +1,7 @@
 # Follow vision — screenshot profiles before interacting; OpenAI decides pass/fail
 enabled: false
 prompt-batch: 615FILMS
+log-videographers: true
 # AI-generated comments (short, casual collab messages) instead of comments.txt
 ai-comment-enabled: false
 ai-comment-prompt: >-

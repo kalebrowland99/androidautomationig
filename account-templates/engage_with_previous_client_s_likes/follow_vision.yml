@@ -1,5 +1,6 @@
 enabled: true
 prompt-batch: 615FILMS
+log-videographers: true
 ai-comment-enabled: true
 ai-comment-prompt: 'Write one very short, casual Instagram comment aimed at a musician
   or artist, hinting that you want to collaborate or work together soon. Keep it under

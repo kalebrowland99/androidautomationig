@@ -1,7 +1,8 @@
-615FILMS: 'You will receive two Instagram profile screenshots: the top of the profile
-  (first image) and the same profile after scrolling partway down (second image).
-  Is this someone who is potentially a musician, artist, or rapper? Only respond with
-  exactly one of these two phrases: potential musician or no.'
+615FILMS: 'You will receive two Instagram profile screenshots (top of profile, then scrolled
+  down) and the profile biography text below. Respond with exactly ONE of these phrases:
+  - potential musician — musician, artist, or rapper (not a videographer) - music videographer
+  — filmmaker/videographer who shoots music videos or works with musicians - no — everyone
+  else.'
 YourLoveFilms: 'You will receive two Instagram profile screenshots: the top of the
   profile (first image) and the same profile after scrolling partway down (second
   image). Is this a person who is likely in a relationship or getting married soon?

@@ -17,6 +17,8 @@ skip_if_link_in_bio: true
 follow_private_or_empty: false
 
 ## Filters on profile stats
+ignore_following_count: false
+ignore_potency: false
 min_followers: 50
 max_followers: 2500
 min_followings: 50

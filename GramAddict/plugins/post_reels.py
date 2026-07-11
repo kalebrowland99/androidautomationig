@@ -36,6 +36,15 @@ class PostReels(Plugin):
             logger.error("username is required for post-reels")
             return
 
+        from GramAddict.core.account_safety import is_autopost_locked
+
+        if is_autopost_locked(username):
+            logger.warning(
+                "post-reels is disabled for @%s (autopost safety lock).",
+                username.lstrip("@"),
+            )
+            return
+
         count = configs.args.post_reels
         try:
             count = int(count)

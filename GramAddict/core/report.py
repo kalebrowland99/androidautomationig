@@ -19,11 +19,11 @@ def print_full_report(sessions, scrape_mode):
                 extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
             )
             logger.info(
-                f"Start time: {session.startTime.strftime('%H:%M:%S (%Y/%m/%d)')}",
+                f"Start time: {session.startTime.strftime('%I:%M:%S %p (%Y/%m/%d)')}",
                 extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
             )
             logger.info(
-                f"Finish time: {finish_time.strftime('%H:%M:%S (%Y/%m/%d)')}",
+                f"Finish time: {finish_time.strftime('%I:%M:%S %p (%Y/%m/%d)')}",
                 extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
             )
             duration = finish_time - session.startTime

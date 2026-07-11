@@ -3357,17 +3357,70 @@ class PostsGridView:
     def _get_post_view(self):
         return self.device.find(resourceIdMatches=case_insensitive_re(ResourceID.LIST))
 
-    def is_post_tappable(self, row: int = 0, col: int = 0) -> bool:
-        """True when the profile grid cell at (row, col) is on screen and clickable."""
+    def _grid_cell(self, row: int, col: int):
         post_list_view = self._get_post_view()
         if not post_list_view.exists(Timeout.ZERO):
-            return False
+            return self.device.find(resourceId="__gramaddict_missing__")
         offset = 1  # row with post thumbnails starts at index 1
         row_view = post_list_view.child(index=row + offset)
         if not row_view.exists(Timeout.ZERO):
+            return self.device.find(resourceId="__gramaddict_missing__")
+        return row_view.child(index=col)
+
+    def is_post_tappable(self, row: int = 0, col: int = 0) -> bool:
+        """True when the profile grid cell at (row, col) is on screen and clickable."""
+        return self._grid_cell(row, col).exists(Timeout.ZERO)
+
+    def is_cell_pinned(self, row: int, col: int) -> bool:
+        """Best-effort pin badge detection (Instagram often omits it from the a11y tree)."""
+        cell = self._grid_cell(row, col)
+        if not cell.exists(Timeout.ZERO):
             return False
-        post_view = row_view.child(index=col)
-        return post_view.exists(Timeout.ZERO)
+        for pattern in (r".*pin.*", r"^pinned$"):
+            pat = case_insensitive_re(pattern)
+            if cell.child(contentDescriptionMatches=pat).exists(Timeout.ZERO):
+                return True
+            if cell.child(textMatches=pat).exists(Timeout.ZERO):
+                return True
+        pin_overlay = cell.find(
+            resourceIdMatches=case_insensitive_re(r".*(?:pin|pinned).*"),
+        )
+        if pin_overlay.exists(Timeout.ZERO):
+            rid = str((pin_overlay.get_info() or {}).get("resourceId") or "").lower()
+            if "image_button" not in rid:
+                return True
+        return False
+
+    def should_skip_cell(self, row: int, col: int, skip_top: int) -> bool:
+        flat = row * 3 + col
+        if skip_top > 0 and flat < skip_top:
+            return True
+        return self.is_cell_pinned(row, col)
+
+    def open_first_post_after_skip(self, skip_top: int = 3):
+        if not self.is_post_tappable(0, 0) and not self.is_post_tappable(1, 0):
+            ProfileView(self.device).swipe_to_fit_posts()
+        for row in range(6):
+            for col in range(3):
+                if not self.is_post_tappable(row, col):
+                    continue
+                if self.should_skip_cell(row, col, skip_top):
+                    reason = (
+                        "pin badge in a11y tree"
+                        if self.is_cell_pinned(row, col)
+                        else f"top {skip_top} grid slot(s)"
+                    )
+                    logger.info(
+                        f"Skip profile grid post at row {row + 1} col {col + 1} ({reason}).",
+                        extra={"color": f"{Fore.CYAN}"},
+                    )
+                    continue
+                logger.info(
+                    f"Opening first post after skip at row {row + 1} col {col + 1}."
+                )
+                return self.navigateToPost(row, col)
+        logger.warning("No post found on profile grid after skipping top slots.")
+        return None, None, None
 
     def navigateToPost(self, row, col):
         post_list_view = self._get_post_view()
@@ -3758,6 +3811,23 @@ class ProfileView(ActionBarView):
         return self.device.find(
             resourceId=ResourceID.REEL_RING,
         )
+
+    def has_story_to_like(self) -> bool:
+        if self.live_marker().exists(Timeout.SHORT):
+            return False
+        return self.StoryRing().exists(Timeout.SHORT)
+
+    def has_unviewed_story(self) -> bool:
+        if not self.has_story_to_like():
+            return False
+        ring = self.StoryRing()
+        try:
+            desc = (ring.ui_info().get("contentDescription") or "").lower()
+            if "seen" in desc:
+                return False
+        except Exception:
+            pass
+        return True
 
     def live_marker(self) -> DeviceFacade.View:
         return self.device.find(resourceId=ResourceID.LIVE_BADGE_VIEW)

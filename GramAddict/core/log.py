@@ -48,7 +48,7 @@ def create_log_file_handler(filename):
     file_handler.setFormatter(
         logging.Formatter(
             fmt="%(asctime)s %(levelname)8s | %(message)s (%(filename)s:%(lineno)d)",
-            datefmt=r"[%m/%d %H:%M:%S]",
+            datefmt=r"[%m/%d %I:%M:%S %p]",
         )
     )
     file_handler.addFilter(LoggerFilterGramAddictOnly())
@@ -84,7 +84,7 @@ def configure_logger(debug, username):
     console_handler.setLevel(console_level)
     console_handler.setFormatter(
         ColoredFormatter(
-            fmt="%(asctime)s %(levelname)8s | %(message)s", datefmt="[%m/%d %H:%M:%S]"
+            fmt="%(asctime)s %(levelname)8s | %(message)s", datefmt="[%m/%d %I:%M:%S %p]"
         )
     )
     console_handler.addFilter(LoggerFilterGramAddictOnly())

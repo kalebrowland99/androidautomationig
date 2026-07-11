@@ -98,16 +98,31 @@
                 <div class="farm-header">
                     <div class="farm-header-copy">
                         <h1 class="farm-header-title">Run GramAddict</h1>
-                        <p class="farm-header-lead">Select a phone and account in the table, then start or stop a session below.</p>
+                        <p class="farm-header-lead">Link each phone to an account, select rows with the checkboxes, then run one phone or the whole batch.</p>
                     </div>
                     <div class="farm-header-actions">
                         <button type="button" id="btn-farm-run" onclick="runGramAddict()"
-                            class="btn-ghost btn-sm btn-primary-outline" disabled>Run</button>
+                            class="btn-ghost btn-sm btn-primary-outline" disabled>Run one</button>
+                        <button type="button" id="btn-farm-run-selected" onclick="runFarmBatch()"
+                            class="btn-ghost btn-sm btn-primary-outline" disabled>Run selected</button>
                         <button type="button" id="btn-farm-stop" onclick="stopGramAddict()" disabled
                             class="btn-ghost btn-sm btn-kill">Stop</button>
+                        <button type="button" id="btn-farm-stop-selected" onclick="stopFarmBatch()" disabled
+                            class="btn-ghost btn-sm btn-kill">Stop selected</button>
                         <button type="button" id="btn-refresh-all" onclick="refreshDevices()"
                             class="btn-ghost btn-sm">Refresh devices</button>
                     </div>
+                </div>
+
+                <div class="farm-batch-bar">
+                    <label class="farm-batch-mode" for="farm-run-mode">
+                        <span class="farm-batch-mode-label">Selected phones run</span>
+                        <select id="farm-run-mode" class="ga-input farm-run-mode-select" onchange="onFarmRunModeChange()">
+                            <option value="consecutive">One after another</option>
+                            <option value="parallel">All at once (parallel)</option>
+                        </select>
+                    </label>
+                    <p class="farm-batch-hint">Parallel starts every selected bot together (heavier on USB and RAM). Consecutive waits for each session to finish before starting the next.</p>
                 </div>
 
                 <div class="grid lg:grid-cols-5 gap-5 md:gap-6 items-start">
@@ -487,7 +502,7 @@
                             <div class="btn-row" style="align-items: center; gap: 0.5rem; flex-wrap: wrap;">
                                 <button type="button" class="btn-ghost btn-sm" onclick="runTelegramTest()">Send Telegram test</button>
                             </div>
-                            <p class="text-xs text-muted-foreground mt-1">Set <strong>telegram-api-token</strong> and <strong>telegram-chat-id</strong> in the account Reports tab (<code>telegram.yml</code>). Message @BotFather for a token, @myidbot for your chat ID, then /start your bot before testing.</p>
+                            <p class="text-xs text-muted-foreground mt-1">Set <strong>telegram-api-token</strong> and <strong>telegram-chat-id</strong> in the account Reports tab (<code>telegram.yml</code>). Message @BotFather for a token, @myidbot for your chat ID, then /start your bot before testing. With the dashboard running, text <strong>status</strong> or <strong>update</strong> for a live progress reply. <strong>Telegram alerts on blocks and errors</strong> messages you when Instagram blocks an action or the bot crashes.</p>
                         </div>
                     </section>
 

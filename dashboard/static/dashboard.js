@@ -23,6 +23,9 @@ let gaPostReelSchema = null;
 let gaFollowVisionSchema = null;
 let gaFilesMeta = null;
 let gaAccountRunning = false;
+let farmBatchRunning = false;
+let farmBatchCancel = false;
+let gaAccountAutopostLocked = false;
 let gaFormLoading = false;
 let gaFormLoadDepth = 0;
 let advFileSnapshot = "";
@@ -61,6 +64,24 @@ async function flushAutosave() {
     await fn();
   }
 }
+
+async function saveAllBeforeRun() {
+  if (!gaCurrentAccountId) return;
+  syncAllCommentsListWidgets();
+  await flushAutosave();
+  await saveGaConfig({ quiet: true });
+  if (document.querySelector("[data-filter-key]")) {
+    await saveGaFilters({ quiet: true });
+  }
+  if (document.querySelector("[data-tg-key]") || document.querySelector('[data-ga-key="telegram-reports"]')) {
+    await saveGaReports({ quiet: true });
+  }
+  if (document.querySelector("[data-pr-key]") || document.querySelector("[data-fv-key]")) {
+    await saveGaPosting({ quiet: true });
+  }
+  await saveGaLists({ quiet: true });
+  await saveGaComments({ quiet: true });
+}
 const ACCOUNT_TAB_LABELS = {
   basics: "Basics",
   jobs: "Jobs",
@@ -77,11 +98,20 @@ function $(id) {
   return document.getElementById(id);
 }
 
+function formatLogTime(date = new Date()) {
+  return date.toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true,
+  });
+}
+
 function log(message, level = "info") {
   const el = $("unified-log");
   if (!el) return;
   const line = document.createElement("div");
-  const ts = new Date().toLocaleTimeString();
+  const ts = formatLogTime();
   line.className = `log-line log-${level}`;
   line.textContent = `[${ts}] ${message}`;
   el.appendChild(line);
@@ -463,7 +493,7 @@ function rebuildSettingsSearchIndex() {
     for (const field of fields) {
       const sub = inlineFieldSubKeys(field);
       const selector = sub
-        ? `[data-ga-key="${sub.listKey}"]${sub.limitKey ? `, [data-ga-key="${sub.limitKey}"]` : ""}`
+        ? `[data-ga-key="${sub.listKey}"]${sub.limitKey ? `, [data-ga-key="${sub.limitKey}"]` : ""}${sub.enabledKey ? `, [data-ga-key="${sub.enabledKey}"]` : ""}`
         : `[data-ga-key="${field.key}"]`;
       items.push({
         key: field.key,
@@ -783,12 +813,13 @@ function updateContextStrip() {
   const stopBtns = ["btn-farm-stop"];
   runBtns.forEach((id) => {
     const el = $(id);
-    if (el) el.disabled = !canRun || running;
+    if (el) el.disabled = !canRun || running || farmBatchRunning;
   });
   stopBtns.forEach((id) => {
     const el = $(id);
-    if (el) el.disabled = !running;
+    if (el) el.disabled = !running || farmBatchRunning;
   });
+  updateFarmBatchButtons();
   $("btn-ctx-mirror") && ($("btn-ctx-mirror").disabled = !activeSerial && selectedSerials.size === 0);
   const quickDebugBtn = $("btn-ctx-quick-debug");
   if (quickDebugBtn) {
@@ -950,6 +981,7 @@ function renderDevices() {
     selectAll.indeterminate = selectedSerials.size > 0 && selectedSerials.size < devices.length;
   }
   updateCounts();
+  updateFarmBatchButtons();
 }
 
 function onDeviceCheckChange(serial, checked) {
@@ -2376,7 +2408,7 @@ function formatTimeReadable(inputTime) {
   if (Number.isNaN(hour) || Number.isNaN(minute)) return "";
   const date = new Date();
   date.setHours(hour, minute, 0, 0);
-  return date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+  return date.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true });
 }
 
 function workingHoursRangeSummary(startInput, endInput) {
@@ -2408,7 +2440,7 @@ function renderWorkingHoursRangeRow(range = { start: "", end: "" }) {
 
 function populateWorkingHoursWidget(widget, value) {
   if (!widget) return;
-  const hidden = widget.querySelector('input[type="hidden"][data-ga-key="working-hours"]');
+  const hidden = widget.querySelector('input[type="hidden"][data-ga-key]');
   const rangesEl = widget.querySelector(".working-hours-ranges");
   if (!hidden || !rangesEl) return;
   const ranges = parseWorkingHoursValue(value);
@@ -2420,7 +2452,7 @@ function populateWorkingHoursWidget(widget, value) {
 
 function syncWorkingHoursWidget(widget) {
   if (!widget) return;
-  const hidden = widget.querySelector('input[type="hidden"][data-ga-key="working-hours"]');
+  const hidden = widget.querySelector('input[type="hidden"][data-ga-key]');
   if (!hidden) return;
   const ranges = [];
   widget.querySelectorAll(".working-hours-range").forEach((row) => {
@@ -2443,7 +2475,7 @@ function syncWorkingHoursWidget(widget) {
 
 function refreshAllWorkingHoursWidgets() {
   document.querySelectorAll(".working-hours-widget").forEach((widget) => {
-    const hidden = widget.querySelector('input[type="hidden"][data-ga-key="working-hours"]');
+    const hidden = widget.querySelector('input[type="hidden"][data-ga-key]');
     populateWorkingHoursWidget(widget, hidden?.value || "");
   });
 }
@@ -2487,7 +2519,9 @@ function bindWorkingHoursWidgets() {
 function inlineFieldSubKeys(field) {
   const key = field.key;
   if (field.type === "inline-file-job") {
-    return { listKey: `${key}-list`, limitKey: `${key}-limit` };
+    const sub = { listKey: `${key}-list`, limitKey: `${key}-limit` };
+    if (field.enable_checkbox) sub.enabledKey = `${key}-enabled`;
+    return sub;
   }
   if (field.type === "inline-lines-file") {
     return { listKey: `${key}-list` };
@@ -2495,8 +2529,68 @@ function inlineFieldSubKeys(field) {
   return null;
 }
 
+function applyInlineFileJobEnableState(fieldKey = "daily-story-likes") {
+  const field = document.querySelector(`.inline-file-job-field[data-inline-file-job="${fieldKey}"]`);
+  if (!field) return;
+  const enabledInput = field.querySelector(`[data-ga-key="${fieldKey}-enabled"]`);
+  const enabled = enabledInput ? enabledInput.checked : true;
+  field.classList.toggle("inline-file-job-disabled", !enabled);
+  field.querySelectorAll("textarea, input.inline-file-limit").forEach((el) => {
+    el.disabled = !enabled;
+    el.setAttribute("aria-disabled", enabled ? "false" : "true");
+  });
+}
+
+function applyAllInlineFileJobEnableStates() {
+  document.querySelectorAll(".inline-file-job-field[data-inline-file-job]").forEach((field) => {
+    applyInlineFileJobEnableState(field.getAttribute("data-inline-file-job"));
+  });
+}
+
 const POST_REEL_ACCEPT =
   "video/mp4,video/quicktime,video/webm,video/x-m4v,.mp4,.mov,.m4v,.webm,.mkv";
+
+function autopostLockedHandles() {
+  const locked = gaSchema?.autopost_locked_accounts || ["615films", "yourlovefilms"];
+  return new Set(locked.map((name) => String(name).replace(/^@/, "").toLowerCase()));
+}
+
+function isAutopostLockedAccount(accountId, username) {
+  const handles = autopostLockedHandles();
+  return [accountId, username]
+    .filter(Boolean)
+    .map((value) => String(value).replace(/^@/, "").toLowerCase())
+    .some((value) => handles.has(value));
+}
+
+function applyPostReelsLock() {
+  const acct = currentAccount();
+  gaAccountAutopostLocked = isAutopostLockedAccount(gaCurrentAccountId, acct?.username);
+  const field = document.querySelector(".post-reels-field");
+  const input = document.querySelector('.post-reels-count[data-ga-key="post-reels"]');
+  if (!field || !input) return;
+
+  let note = field.querySelector(".post-reels-lock-note");
+  if (gaAccountAutopostLocked) {
+    input.value = "0";
+    input.disabled = true;
+    input.setAttribute("aria-disabled", "true");
+    field.classList.add("post-reels-locked");
+    if (!note) {
+      note = document.createElement("p");
+      note.className = "post-reels-lock-note";
+      field.appendChild(note);
+    }
+    const handle = (acct?.username || gaCurrentAccountId || "this account").replace(/^@/, "");
+    note.textContent = `Autopost locked for @${handle} — reel posting is disabled to prevent accidents.`;
+  } else {
+    input.disabled = false;
+    input.removeAttribute("aria-disabled");
+    field.classList.remove("post-reels-locked");
+    note?.remove();
+  }
+  updatePostReelsInline();
+}
 
 function renderFormField(field, attr = "data-ga-key") {
   const key = field.key;
@@ -2522,9 +2616,15 @@ function renderFormField(field, attr = "data-ga-key") {
     const limitPh = escapeHtml(field.limit_placeholder || "10-15");
     const fileHint = field.file ? escapeHtml(field.file) : "targets.txt";
     const limitLabel = configKeyLabelHtml(sub.limitKey, field.limit_help || undefined);
+    const header = field.enable_checkbox
+      ? `<label class="ga-check inline-file-enable">
+          <input type="checkbox" class="ui-checkbox" ${attr}="${sub.enabledKey}" data-inline-file-enable="${key}">
+          <span class="ga-check-label">${label}</span>
+        </label>`
+      : `<label>${label}</label>`;
     return `
-      <div class="field inline-file-job-field field-span-2">
-        <label>${label}</label>
+      <div class="field inline-file-job-field field-span-2" data-inline-file-job="${key}">
+        <div class="inline-file-job-header">${header}</div>
         <p class="inline-file-hint">Edit here — saved as <code>${fileHint}</code> automatically.</p>
         <textarea ${attr}="${sub.listKey}" class="ga-input" rows="4" placeholder="${linesPlaceholder}"></textarea>
         <div class="inline-file-limit-row">
@@ -2659,6 +2759,7 @@ function renderAccountForms() {
   renderSectionsInto("ga-form-schedule", tabs.schedule || [], gaSchema);
   renderSectionsInto("ga-form-reports", tabs.reports || [], gaSchema);
   populateGaDeviceSelects();
+  applyAllInlineFileJobEnableStates();
 }
 
 function renderFiltersForm() {
@@ -2841,6 +2942,10 @@ async function loadPostReelMedia() {
 }
 
 async function uploadPostReelFiles(fileList) {
+  if (gaAccountAutopostLocked) {
+    setPostReelUploadStatus("Reel uploads are locked for this account", "error");
+    return;
+  }
   if (!gaCurrentAccountId) {
     setPostReelUploadStatus("Select an account first", "error");
     return;
@@ -3053,6 +3158,10 @@ function syncCommentsListWidget(widget) {
   hidden.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+function syncAllCommentsListWidgets() {
+  document.querySelectorAll(".comments-list-widget").forEach((widget) => syncCommentsListWidget(widget));
+}
+
 function refreshCommentsListWidgets() {
   document.querySelectorAll(".comments-list-widget").forEach((widget) => {
     const hidden = widget.querySelector('input[type="hidden"][data-file-key="comments_list.txt"]');
@@ -3147,10 +3256,13 @@ function fillGaForm(form) {
   fillFields("data-ga-key", form);
   refreshAllWorkingHoursWidgets();
   populateGaDeviceSelects(form?.device || "");
+  applyAllInlineFileJobEnableStates();
 }
 
 function collectGaForm() {
-  return collectFields("data-ga-key");
+  const form = collectFields("data-ga-key");
+  if (gaAccountAutopostLocked) form["post-reels"] = "0";
+  return form;
 }
 
 let sessionEstimateTimer = null;
@@ -3453,7 +3565,8 @@ async function onGaAccountChange() {
     if (!acctRes.ok) throw new Error(await acctRes.text());
     const data = await acctRes.json();
     fillGaForm(data.form || {});
-    updatePostReelsInline();
+    gaAccountAutopostLocked = !!data.autopost_locked;
+    applyPostReelsLock();
     const raw = $("ga-raw-yaml");
     if (raw) raw.value = data.raw_yaml || "";
     syncRunButtons(data.running);
@@ -3730,6 +3843,7 @@ async function saveGaLists(opts = {}) {
 async function saveGaComments(opts = {}) {
   const quiet = opts.quiet === true;
   if (!gaFilesMeta?.text) return;
+  syncAllCommentsListWidgets();
   setGaStatus("Saving…", "");
   try {
     await saveAccountTextFiles(Object.keys(gaFilesMeta.text));
@@ -3756,6 +3870,14 @@ function onAccountFieldInput(event) {
     return;
   }
   if (target.matches("[data-ga-key]")) {
+    if (target.getAttribute("data-ga-key") === "post-reels" && gaAccountAutopostLocked) {
+      target.value = "0";
+      applyPostReelsLock();
+      return;
+    }
+    if (target.hasAttribute("data-inline-file-enable")) {
+      applyInlineFileJobEnableState(target.getAttribute("data-inline-file-enable"));
+    }
     if (target.getAttribute("data-ga-key") === "post-reels") {
       updatePostReelsInline();
       if (postReelsCountValue() > 0) loadPostReelMedia();
@@ -3828,6 +3950,193 @@ function resolveRunDevice() {
   return deviceSelect?.value || activeSerial || acct?.device || "";
 }
 
+function getFarmRunMode() {
+  const select = $("farm-run-mode");
+  return select?.value || localStorage.getItem("farmRunMode") || "consecutive";
+}
+
+function onFarmRunModeChange() {
+  const mode = getFarmRunMode();
+  localStorage.setItem("farmRunMode", mode);
+}
+
+function initFarmRunMode() {
+  const select = $("farm-run-mode");
+  if (!select) return;
+  const saved = localStorage.getItem("farmRunMode") || "consecutive";
+  if ([...select.options].some((o) => o.value === saved)) select.value = saved;
+}
+
+function farmBatchSerials() {
+  if (selectedSerials.size > 0) return [...selectedSerials];
+  return activeSerial ? [activeSerial] : [];
+}
+
+function resolveFarmBatchTargets() {
+  const serials = farmBatchSerials();
+  const targets = [];
+  const skipped = [];
+  for (const serial of serials) {
+    const account = accountForDevice(serial);
+    if (!account) {
+      skipped.push({ serial, reason: "no linked account" });
+      continue;
+    }
+    if (account.running) {
+      skipped.push({ serial, reason: "already running" });
+      continue;
+    }
+    targets.push({ serial, account });
+  }
+  return { targets, skipped, serials };
+}
+
+function updateFarmBatchButtons() {
+  const { targets, skipped, serials } = resolveFarmBatchTargets();
+  const anyRunningSelected = serials.some((serial) => accountForDevice(serial)?.running);
+  const runSelected = $("btn-farm-run-selected");
+  const stopSelected = $("btn-farm-stop-selected");
+  if (runSelected) {
+    runSelected.disabled = farmBatchRunning || targets.length === 0;
+    runSelected.title =
+      targets.length === 0
+        ? skipped.length
+          ? "Selected phones need linked accounts (and must not already be running)"
+          : "Select one or more phones with the checkboxes"
+        : `${targets.length} phone(s) ready — ${getFarmRunMode() === "parallel" ? "parallel" : "consecutive"}`;
+  }
+  if (stopSelected) {
+    stopSelected.disabled = !farmBatchRunning && !anyRunningSelected;
+  }
+}
+
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForBotDone(accountId) {
+  while (!farmBatchCancel) {
+    const res = await fetch(`/api/gramaddict/accounts/${encodeURIComponent(accountId)}/status`);
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Status check failed");
+    if (!data.running) return true;
+    await sleepMs(3000);
+  }
+  return false;
+}
+
+async function startBotForFarmTarget(serial, accountId) {
+  const res = await fetch(`/api/gramaddict/accounts/${encodeURIComponent(accountId)}/run`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ device_serial: serial, vpn_app_name: getVpnAppName() }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.detail || "Failed to start bot");
+  return data;
+}
+
+async function runFarmBatch() {
+  if (farmBatchRunning) return;
+  const { targets, skipped } = resolveFarmBatchTargets();
+  if (targets.length === 0) {
+    const detail =
+      skipped.length > 0
+        ? skipped.map((s) => `${shortSerial(s.serial)}: ${s.reason}`).join("; ")
+        : "Select phones with linked accounts";
+    setGaStatus(detail, "error");
+    log(detail, "error");
+    return;
+  }
+
+  const mode = getFarmRunMode();
+  localStorage.setItem("farmRunMode", mode);
+  farmBatchRunning = true;
+  farmBatchCancel = false;
+  updateFarmBatchButtons();
+  updateContextStrip();
+
+  for (const item of skipped) {
+    log(`Skip ${shortSerial(item.serial)} — ${item.reason}`, "error");
+  }
+  log(
+    `Farm batch (${mode === "parallel" ? "parallel" : "one after another"}): ${targets.length} phone(s)`,
+    "info"
+  );
+
+  try {
+    if (mode === "parallel") {
+      for (let i = 0; i < targets.length; i += 1) {
+        if (farmBatchCancel) break;
+        const { serial, account } = targets[i];
+        log(`Starting @${account.username || account.id} on ${shortSerial(serial)}…`);
+        await startBotForFarmTarget(serial, account.id);
+        if (i < targets.length - 1) await sleepMs(1500);
+      }
+      setGaStatus(`Started ${targets.length} bot(s) in parallel`, "success");
+    } else {
+      for (const { serial, account } of targets) {
+        if (farmBatchCancel) break;
+        const label = account.username || account.id;
+        log(`Queue: starting @${label} on ${shortSerial(serial)}…`);
+        await startBotForFarmTarget(serial, account.id);
+        await loadGaAccounts();
+        renderDevices();
+        const finished = await waitForBotDone(account.id);
+        if (!finished) {
+          log(`Queue cancelled while @${label} was running`, "error");
+          break;
+        }
+        log(`Finished @${label} on ${shortSerial(serial)}`, "success");
+        await loadGaAccounts();
+        renderDevices();
+      }
+      if (!farmBatchCancel) {
+        setGaStatus(`Farm queue finished (${targets.length} phone(s))`, "success");
+      }
+    }
+  } catch (err) {
+    setGaStatus(err.message, "error");
+    log(err.message, "error");
+  } finally {
+    farmBatchRunning = false;
+    farmBatchCancel = false;
+    await loadGaAccounts();
+    renderDevices();
+    updateContextStrip();
+  }
+}
+
+async function stopFarmBatch() {
+  farmBatchCancel = true;
+  const serials = farmBatchSerials();
+  const stopped = [];
+  const errors = [];
+  for (const serial of serials) {
+    const account = accountForDevice(serial);
+    if (!account?.running) continue;
+    try {
+      const res = await fetch(`/api/gramaddict/accounts/${encodeURIComponent(account.id)}/stop`, {
+        method: "POST",
+      });
+      const data = await res.json();
+      if (!res.ok || !data.stopped) throw new Error(data.detail || data.message || "Stop failed");
+      stopped.push(account.username || account.id);
+    } catch (err) {
+      errors.push(`${account.username || account.id}: ${err.message}`);
+    }
+  }
+  if (stopped.length) log(`Stopped: ${stopped.map((n) => `@${n}`).join(", ")}`, "success");
+  if (errors.length) log(errors.join("; "), "error");
+  if (stopped.length || errors.length) {
+    setGaStatus(stopped.length ? `Stopped ${stopped.length} bot(s)` : errors[0], stopped.length ? "success" : "error");
+  }
+  farmBatchRunning = false;
+  await loadGaAccounts();
+  renderDevices();
+  updateContextStrip();
+}
+
 async function runGramAddict() {
   setActiveSaveField(null);
   const acct = currentAccount();
@@ -3846,6 +4155,7 @@ async function runGramAddict() {
     return;
   }
   try {
+    await saveAllBeforeRun();
     const res = await fetch(`/api/gramaddict/accounts/${encodeURIComponent(accountId)}/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -3872,6 +4182,7 @@ async function stopGramAddict() {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "Stop failed");
+    if (!data.stopped) throw new Error(data.message || "Bot is not running");
     syncRunButtons(false);
     setGaStatus(data.message || "Bot stopped", "success");
     log(`GramAddict stopped for ${accountId}`);
@@ -4067,6 +4378,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindSettingSearch();
   bindDebugPanel();
   bindBrandPools();
+  initFarmRunMode();
   connectWebSocket();
   await loadDeviceFilterMeta();
   await refreshDevices();

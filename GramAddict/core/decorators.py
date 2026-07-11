@@ -12,6 +12,7 @@ from uiautomator2.exceptions import UiObjectNotFoundError
 from GramAddict.core.device_facade import DeviceFacade
 from GramAddict.core.report import print_full_report
 from GramAddict.core.utils import (
+    ActionBlockedError,
     check_if_crash_popup_is_there,
     close_instagram,
     open_instagram,
@@ -20,8 +21,20 @@ from GramAddict.core.utils import (
     stop_bot,
 )
 from GramAddict.core.views import TabBarView
+from GramAddict.plugins.telegram import send_telegram_alert
 
 logger = logging.getLogger(__name__)
+
+
+def _account_username(session_state, configs):
+    return session_state.my_username or getattr(configs.args, "username", None)
+
+
+def _notify_fatal_error(session_state, configs, title: str, details: str) -> None:
+    try:
+        send_telegram_alert(_account_username(session_state, configs), title, details)
+    except Exception:
+        logger.debug("Telegram alert failed", exc_info=True)
 
 
 def run_safely(device, device_id, sessions, session_state, screen_record, configs):
@@ -38,7 +51,7 @@ def run_safely(device, device_id, sessions, session_state, screen_record, config
                         extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
                     )
                     logger.info(
-                        f"-------- PAUSED: {datetime.now().strftime('%H:%M:%S')} --------",
+                        f"-------- PAUSED: {datetime.now().strftime('%I:%M:%S %p')} --------",
                         extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
                     )
                     logger.info(
@@ -53,7 +66,7 @@ def run_safely(device, device_id, sessions, session_state, screen_record, config
                     input("")
 
                     logger.info(
-                        f"-------- RESUMING: {datetime.now().strftime('%H:%M:%S')} --------",
+                        f"-------- RESUMING: {datetime.now().strftime('%I:%M:%S %p')} --------",
                         extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
                     )
                     TabBarView(device).navigateToProfile()
@@ -86,7 +99,30 @@ def run_safely(device, device_id, sessions, session_state, screen_record, config
                     configs,
                 )
 
+            except ActionBlockedError as e:
+                _notify_fatal_error(
+                    session_state,
+                    configs,
+                    "Action blocked",
+                    str(e),
+                )
+                logger.error(traceback.format_exc())
+                try:
+                    save_crash(device)
+                except RequestsConnectionError:
+                    logger.warning("Could not save crash dump — device disconnected.")
+                close_instagram(device)
+                print_full_report(sessions, configs.args.scrape_to_file)
+                sessions.persist(directory=session_state.my_username)
+                raise e from e
+
             except Exception as e:
+                _notify_fatal_error(
+                    session_state,
+                    configs,
+                    "Session error",
+                    f"{type(e).__name__}: {e}",
+                )
                 logger.error(traceback.format_exc())
                 for exception_line in traceback.format_exception_only(type(e), e):
                     logger.critical(
@@ -138,6 +174,12 @@ def restart(
         ):
             logger.error(
                 "Reached crashes limit. Bot has crashed too much! Please check what's going on."
+            )
+            _notify_fatal_error(
+                session_state,
+                configs,
+                "Crash limit reached",
+                "Too many crashes this session. Bot is stopping.",
             )
             stop_bot(device, sessions, session_state)
         logger.info("Something unexpected happened. Let's try again.")

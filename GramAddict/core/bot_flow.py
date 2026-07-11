@@ -11,6 +11,8 @@ from GramAddict.core.device_facade import create_device, get_device_info
 from GramAddict.core.filter import Filter
 from GramAddict.core.filter import load_config as load_filter
 from GramAddict.core.interaction import load_config as load_interaction
+from GramAddict.core.live_progress import write_live_progress
+from GramAddict.plugins.telegram import send_telegram_alert
 from GramAddict.core.log import (
     configure_logger,
     is_log_file_updated,
@@ -132,7 +134,7 @@ def start_bot(**kwargs):
         head_up_notifications(enabled=False)
         logger.info(
             "-------- START: "
-            + str(session_state.startTime.strftime("%H:%M:%S - %Y/%m/%d"))
+            + str(session_state.startTime.strftime("%I:%M:%S %p - %Y/%m/%d"))
             + " --------",
             extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
         )
@@ -152,6 +154,11 @@ def start_bot(**kwargs):
             vpn_app = configs.args.vpn_app_name or "Shadowrocket"
             if not ensure_shadowrocket_vpn(device, vpn_app):
                 logger.critical("VPN check failed. Aborting session.")
+                send_telegram_alert(
+                    configs.username or session_state.my_username,
+                    "VPN check failed",
+                    f"Could not connect {vpn_app} before opening Instagram.",
+                )
                 stop_bot(device, sessions, session_state, was_sleeping=False)
                 continue
         if open_instagram(device):
@@ -222,6 +229,12 @@ def start_bot(**kwargs):
             logger.critical(
                 f"Username: {session_state.my_username}, Posts: {session_state.my_posts_count}, Followers: {session_state.my_followers_count}, Following: {session_state.my_following_count}"
             )
+            send_telegram_alert(
+                configs.username or session_state.my_username,
+                "Profile could not load",
+                "Could not read username, posts, followers, or following. "
+                "Often a soft-ban or connection issue. Check the crash screenshot.",
+            )
             save_crash(device)
             stop_bot(device, sessions, session_state)
 
@@ -234,6 +247,12 @@ def start_bot(**kwargs):
                 )
         report_string = f"Hello, @{session_state.my_username}! You have {session_state.my_followers_count} followers and {session_state.my_following_count} followings so far."
         logger.info(report_string, extra={"color": f"{Style.BRIGHT}{Fore.GREEN}"})
+        write_live_progress(
+            session_state.my_username,
+            session_state,
+            running=True,
+            current_job="session",
+        )
         if configs.args.repeat:
             logger.info(
                 f"You have {total_sessions + 1 - len(sessions) if total_sessions > 0 else 'infinite'} session(s) left. You can stop the bot by pressing CTRL+C in console.",
@@ -318,8 +337,20 @@ def start_bot(**kwargs):
                     f"Current unfollow-job: {plugin}",
                     extra={"color": f"{Style.BRIGHT}{Fore.BLUE}"},
                 )
+                write_live_progress(
+                    session_state.my_username,
+                    session_state,
+                    running=True,
+                    current_job=plugin,
+                )
                 configs.actions[plugin].run(
                     device, configs, storage, sessions, filters, plugin
+                )
+                write_live_progress(
+                    session_state.my_username,
+                    session_state,
+                    running=True,
+                    current_job=plugin,
                 )
                 unfollow_jobs.remove(plugin)
                 print_limits = True
@@ -342,6 +373,12 @@ def start_bot(**kwargs):
                     f"Current active-job: {plugin}",
                     extra={"color": f"{Style.BRIGHT}{Fore.BLUE}"},
                 )
+                write_live_progress(
+                    session_state.my_username,
+                    session_state,
+                    running=True,
+                    current_job=plugin,
+                )
                 if configs.args.scrape_to_file is not None:
                     logger.warning(
                         "You're in scraping mode! That means you're only collection data without interacting!"
@@ -349,10 +386,22 @@ def start_bot(**kwargs):
                 configs.actions[plugin].run(
                     device, configs, storage, sessions, filters, plugin
                 )
+                write_live_progress(
+                    session_state.my_username,
+                    session_state,
+                    running=True,
+                    current_job=plugin,
+                )
                 print_limits = True
 
         # save the session in sessions.json
         session_state.finishTime = datetime.now()
+        write_live_progress(
+            session_state.my_username,
+            session_state,
+            running=False,
+            current_job=None,
+        )
         sessions.persist(directory=session_state.my_username)
 
         # print reports
@@ -385,7 +434,7 @@ def start_bot(**kwargs):
         head_up_notifications(enabled=True)
         logger.info(
             "-------- FINISH: "
-            + str(session_state.finishTime.strftime("%H:%M:%S - %Y/%m/%d"))
+            + str(session_state.finishTime.strftime("%I:%M:%S %p - %Y/%m/%d"))
             + " --------",
             extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
         )
@@ -408,7 +457,7 @@ def start_bot(**kwargs):
                     time_left,
                 )
                 logger.info(
-                    f'Next session will start at: {(datetime.now() + timedelta(seconds=time_left)).strftime("%H:%M:%S (%Y/%m/%d)")}.'
+                    f'Next session will start at: {(datetime.now() + timedelta(seconds=time_left)).strftime("%I:%M:%S %p (%Y/%m/%d)")}.'
                 )
                 try:
                     sleep(time_left)

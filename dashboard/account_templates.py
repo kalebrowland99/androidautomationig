@@ -38,6 +38,7 @@ SETTINGS_FILES = (
     "pm_list.txt",
     "whitelist.txt",
     "blacklist.txt",
+    "story_likes.txt",
     "unfollow_list.txt",
     "remove_list.txt",
 )
@@ -155,7 +156,7 @@ def apply_settings_to_account(
     dest_dir = _account_dir(target_id)
     copied: list[str] = []
 
-    list_files = {"whitelist.txt", "blacklist.txt", "unfollow_list.txt", "remove_list.txt"}
+    list_files = {"whitelist.txt", "blacklist.txt", "story_likes.txt", "unfollow_list.txt", "remove_list.txt"}
     for filename in SETTINGS_FILES:
         if not include_lists and filename in list_files:
             continue

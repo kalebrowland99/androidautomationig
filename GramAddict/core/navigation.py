@@ -94,7 +94,7 @@ def nav_to_hashtag_or_place(device, target, current_job):
         return False
 
 
-def nav_to_post_likers(device, username, my_username):
+def nav_to_post_likers(device, username, my_username, skip_top_profile_posts: int = 3):
     """navigate to blogger post likers"""
     if username == my_username:
         TabBarView(device).navigateToProfile()
@@ -110,13 +110,22 @@ def nav_to_post_likers(device, username, my_username):
         private_empty = "Private" if is_private else "Empty"
         logger.info(f"{private_empty} account.", extra={"color": f"{Fore.GREEN}"})
         return False
-    logger.info(f"Opening the first post of {username}.")
+    skip_top = max(0, int(skip_top_profile_posts or 0))
+    if skip_top:
+        logger.info(
+            f"Opening first post after skipping top {skip_top} grid slot(s) for {username}."
+        )
+    else:
+        logger.info(f"Opening the first post of {username}.")
     grid_view = PostsGridView(device)
-    if not grid_view.is_post_tappable(0, 0):
-        ProfileView(device).swipe_to_fit_posts()
-    opened, _, _ = grid_view.navigateToPost(0, 0)
+    if skip_top:
+        opened, _, _ = grid_view.open_first_post_after_skip(skip_top)
+    else:
+        if not grid_view.is_post_tappable(0, 0):
+            ProfileView(device).swipe_to_fit_posts()
+        opened, _, _ = grid_view.navigateToPost(0, 0)
     if opened is None:
-        logger.warning(f"Could not open first post of {username}.")
+        logger.warning(f"Could not open a post of {username}.")
         return False
     return True
 

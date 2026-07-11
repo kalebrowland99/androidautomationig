@@ -6,6 +6,7 @@ import base64
 import io
 import logging
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -17,12 +18,17 @@ ACCOUNTS = Path("accounts")
 FOLLOW_VISION_FILENAME = "follow_vision.yml"
 FOLLOW_VISION_PROMPTS_FILENAME = "follow_vision_prompts.yml"
 POST_REEL_FILENAME = "post_reel.yml"
+FOUND_VIDEOGRAPHERS_FILENAME = "found_videographers_tn.txt"
+VIDEOGRAPHER_PHRASE = "music videographer"
 
 DEFAULT_PROMPT_615 = (
-    "You will receive two Instagram profile screenshots: the top of the profile (first image) "
-    "and the same profile after scrolling partway down (second image). "
-    "Is this someone who is potentially a musician, artist, or rapper? "
-    "Only respond with exactly one of these two phrases: potential musician or no."
+    "You will receive two Instagram profile screenshots (top of profile, then scrolled down) "
+    "and the profile biography text below. "
+    "Respond with exactly ONE of these phrases:\n"
+    "- potential musician — musician, artist, or rapper (not a videographer)\n"
+    "- music videographer — filmmaker/videographer who shoots music videos or works with musicians "
+    "(read bio/posts for videographer, music video, MV director, DP, cinematographer, filmmaker)\n"
+    "- no — everyone else"
 )
 DEFAULT_PROMPT_YLF = (
     "You will receive two Instagram profile screenshots: the top of the profile (first image) "
@@ -93,6 +99,7 @@ def default_follow_vision_yml() -> dict[str, Any]:
     return {
         "enabled": False,
         "prompt-batch": "615FILMS",
+        "log-videographers": True,
         "ai-comment-enabled": False,
         "ai-comment-prompt": DEFAULT_COMMENT_PROMPT,
     }
@@ -112,6 +119,8 @@ def get_account_follow_vision(account_key: str) -> dict[str, Any]:
     defaults = default_follow_vision_yml()
     for key, value in defaults.items():
         data.setdefault(key, value)
+    if "log-videographers" not in data and "log-tn-videographers" in data:
+        data["log-videographers"] = bool(data["log-tn-videographers"])
     data.pop("openai-model", None)
     return data
 
@@ -159,8 +168,76 @@ def response_passes(text: str, batch_name: str) -> bool:
     return False
 
 
+def response_is_music_videographer(text: str) -> bool:
+    normalized = _normalize_response(text)
+    if "potential musician" in normalized:
+        return False
+    return normalized == VIDEOGRAPHER_PHRASE or normalized.startswith(
+        f"{VIDEOGRAPHER_PHRASE} "
+    )
+
+
+def response_is_tn_music_videographer(text: str) -> bool:
+    """Backward-compatible alias."""
+    return response_is_music_videographer(text)
+
+
+def _videographer_log_enabled(settings: dict[str, Any]) -> bool:
+    if "log-videographers" in settings:
+        return bool(settings.get("log-videographers"))
+    return bool(settings.get("log-tn-videographers", True))
+
+
+def _videographer_log_path(account_key: str) -> Path:
+    return resolve_account_dir(account_key) / FOUND_VIDEOGRAPHERS_FILENAME
+
+
+def log_found_videographer(
+    account_key: str,
+    username: str,
+    bio: str,
+    raw_response: str,
+) -> None:
+    """Append a music videographer lead (deduped by username)."""
+    path = _videographer_log_path(account_key)
+    uname = username.lstrip("@").strip()
+    if not uname:
+        return
+    if path.is_file():
+        existing = path.read_text(encoding="utf-8").lower()
+        if f"@{uname.lower()}\t" in existing or f"\t@{uname.lower()}\t" in existing:
+            logger.debug("Videographer @%s already in %s", uname, path.name)
+            return
+    bio_one_line = re.sub(r"\s+", " ", (bio or "").strip())[:300]
+    ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"{ts}\t@{uname}\t{raw_response.strip()}\t{bio_one_line}\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+    logger.info(
+        "Logged music videographer @%s → %s",
+        uname,
+        path,
+    )
+
+
+def log_found_tn_videographer(
+    account_key: str,
+    username: str,
+    bio: str,
+    raw_response: str,
+    city: str = "",
+) -> None:
+    """Backward-compatible alias."""
+    log_found_videographer(account_key, username, bio, raw_response)
+
+
 def analyze_profile_images(
-    account_key: str, image_bytes_list: list[bytes], *, force: bool = False
+    account_key: str,
+    image_bytes_list: list[bytes],
+    bio_text: str = "",
+    *,
+    force: bool = False,
 ) -> tuple[bool, str]:
     """Return (passed, raw_response). Raises on API/config errors."""
     settings = get_account_follow_vision(account_key)
@@ -173,6 +250,9 @@ def analyze_profile_images(
     prompts = get_account_follow_vision_prompts(account_key)
     batch_name = str(settings.get("prompt-batch") or "615FILMS")
     prompt = prompts.get(batch_name) or prompts.get("615FILMS") or DEFAULT_PROMPT_615
+    bio_clean = re.sub(r"\s+", " ", (bio_text or "").strip())
+    if bio_clean and batch_name == "615FILMS":
+        prompt = f"{prompt}\n\nProfile biography:\n{bio_clean}"
     api_key = _openai_api_key(account_key)
     if not api_key:
         raise ValueError("openai-api-key not set in follow_vision.yml or post_reel.yml")
@@ -193,9 +273,11 @@ def analyze_profile_images(
     response = client.chat.completions.create(
         model=_openai_model(account_key),
         messages=[{"role": "user", "content": content}],
-        max_tokens=20,
+        max_tokens=40,
     )
     raw = (response.choices[0].message.content or "").strip()
+    if batch_name == "615FILMS" and response_is_music_videographer(raw):
+        return False, raw
     passed = response_passes(raw, batch_name)
     return passed, raw
 
@@ -298,8 +380,24 @@ def profile_passes_follow_vision(device, username: str, account_key: str) -> boo
         return True
 
     try:
+        from GramAddict.core.views import ProfileView
+
         images = capture_profile_vision_screenshots(device)
-        passed, raw = analyze_profile_images(account_key, images)
+        bio = ProfileView(device, is_own_profile=False).getProfileBiography()
+        batch_name = str(settings.get("prompt-batch") or "615FILMS")
+
+        passed, raw = analyze_profile_images(account_key, images, bio)
+        if (
+            batch_name == "615FILMS"
+            and _videographer_log_enabled(settings)
+            and response_is_music_videographer(raw)
+        ):
+            log_found_videographer(
+                account_key,
+                username,
+                bio,
+                raw,
+            )
         if passed:
             logger.info(
                 "Follow vision passed for @%s (%s)",

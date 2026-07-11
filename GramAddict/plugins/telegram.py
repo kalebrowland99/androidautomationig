@@ -30,16 +30,56 @@ def load_telegram_config(username) -> Optional[dict]:
         return None
 
 
-def telegram_bot_send_text(bot_api_token, bot_chat_ID, text):
+def telegram_bot_send_text(bot_api_token, bot_chat_ID, text, parse_mode="markdown"):
     try:
         method = "sendMessage"
-        parse_mode = "markdown"
-        params = {"text": text, "chat_id": bot_chat_ID, "parse_mode": parse_mode}
+        params = {"text": text, "chat_id": bot_chat_ID}
+        if parse_mode:
+            params["parse_mode"] = parse_mode
         url = f"https://api.telegram.org/bot{bot_api_token}/{method}"
         return requests.get(url, params=params).json()
     except Exception as e:
         logger.error(f"Error sending Telegram message: {e}")
         return None
+
+
+def telegram_alerts_enabled(telegram_config: dict) -> bool:
+    return telegram_config.get("telegram-alerts", True) is not False
+
+
+def send_telegram_alert(
+    username: Optional[str],
+    title: str,
+    details: str,
+) -> bool:
+    """Send an immediate Telegram alert (action block, crash, etc.)."""
+    if not username:
+        return False
+    telegram_config = load_telegram_config(username)
+    if not telegram_config or not telegram_alerts_enabled(telegram_config):
+        return False
+    token = telegram_config.get("telegram-api-token")
+    chat_id = telegram_config.get("telegram-chat-id")
+    if not token or not chat_id:
+        return False
+    stamp = datetime.now().strftime("%I:%M %p")
+    text = (
+        f"⚠️ {title}\n\n"
+        f"Account: @{username}\n"
+        f"Time: {stamp}\n\n"
+        f"{details.strip()}\n\n"
+        "Bot stopped this session."
+    )
+    response = telegram_bot_send_text(token, chat_id, text, parse_mode=None)
+    if response and response.get("ok"):
+        logger.info(
+            "Telegram alert sent.",
+            extra={"color": f"{Style.BRIGHT}{Fore.BLUE}"},
+        )
+        return True
+    error = response.get("description") if response else "Unknown error"
+    logger.error(f"Failed to send Telegram alert: {error}")
+    return False
 
 
 def _initialize_aggregated_data():

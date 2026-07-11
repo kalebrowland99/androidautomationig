@@ -359,6 +359,13 @@ class CoreArguments(Plugin):
                 "default": "5",
             },
             {
+                "arg": "--skip-top-profile-posts",
+                "nargs": None,
+                "help": "skip the first N posts on a profile grid, 3 by default. Set 0 to disable.",
+                "metavar": 3,
+                "default": "3",
+            },
+            {
                 "arg": "--uia-version",
                 "nargs": None,
                 "help": "uiautomator version, deprecated.",

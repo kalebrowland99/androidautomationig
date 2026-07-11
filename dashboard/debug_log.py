@@ -25,7 +25,7 @@ class DebugLogHandler(logging.Handler):
         self.setFormatter(
             logging.Formatter(
                 fmt="%(asctime)s %(levelname).1s | %(message)s",
-                datefmt="%H:%M:%S",
+                datefmt="%I:%M:%S %p",
             )
         )
         self.addFilter(_DebugLogFilter())

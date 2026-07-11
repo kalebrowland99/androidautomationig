@@ -239,6 +239,25 @@ def estimate_session(config: dict[str, Any], *, post_reel: dict[str, Any] | None
             }
         )
 
+    # Daily story likes
+    story_enabled = bool(config.get("daily-story-likes-enabled"))
+    sl_lo, sl_hi, sl_mid = parse_range(config.get("daily-story-likes-limit"), 0)
+    if not sl_mid and story_enabled:
+        story_list = _lines(config.get("daily-story-likes-list"))
+        if story_list:
+            sl_lo = sl_hi = sl_mid = float(len(story_list))
+    if story_enabled and sl_mid > 0:
+        story_sec_lo, story_sec_hi = 18, 35
+        job_breakdown.append(
+            {
+                "job": "daily-story-likes",
+                "label": f"Daily story likes ({int(sl_lo) if sl_lo == sl_hi else f'{int(sl_lo)}–{int(sl_hi)}'} account(s))",
+                "minutes": _format_range(sl_lo * story_sec_lo / 60, sl_hi * story_sec_hi / 60),
+            }
+        )
+        expected_profiles_lo += sl_lo * 0.5
+        expected_profiles_hi += sl_hi
+
     # Blogger / hashtag jobs
     for key in sorted(BLOGGER_JOBS | HASHTAG_JOBS):
         sources = _lines(config.get(key))
@@ -425,6 +444,7 @@ def estimate_session(config: dict[str, Any], *, post_reel: dict[str, Any] | None
     crashes_mid = parse_range(config.get("total-crashes-limit"), 5)[2]
     source_count = sum(len(_lines(config.get(k))) for k in BLOGGER_JOBS | HASHTAG_JOBS)
     source_count += len(_lines(config.get("interact-from-file-list")))
+    source_count += len(_lines(config.get("daily-story-likes-list"))) if config.get("daily-story-likes-enabled") else 0
     source_count += len(_lines(config.get("interact-usernames")))
     if crashes_mid >= 3 and source_count > 5:
         warnings.append(

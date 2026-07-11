@@ -6,12 +6,16 @@ import asyncio
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any, Optional
 
 import yaml
+
+from GramAddict.core.account_safety import apply_autopost_lock, is_autopost_locked, AUTOPOST_LOCKED_USERNAMES
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ACCOUNTS_DIR = PROJECT_ROOT / "accounts"
@@ -19,6 +23,7 @@ CONFIG_TEMPLATE = PROJECT_ROOT / "config-examples" / "config.yml"
 
 _bot_processes: dict[str, subprocess.Popen[str]] = {}
 _bot_log_buffers: dict[str, list[str]] = {}
+BOT_PID_FILENAME = ".bot.pid"
 
 from dashboard.gramaddict_fields import (
     ACCOUNT_CONFIG_TABS,
@@ -48,15 +53,21 @@ from dashboard.gramaddict_filters_fields import (
 )
 
 TARGETS_LIST_FILE = "targets.txt"
+STORY_LIKES_LIST_FILE = "story_likes.txt"
 POST_URLS_FILE = "post_urls.txt"
 LIKE_URLS_FILE = "like_urls.txt"
 UNFOLLOW_LIST_FILENAME = "unfollow_list.txt"
 REMOVE_LIST_FILENAME = "remove_list.txt"
 WHITELIST_FILENAME = "whitelist.txt"
 INTERACT_JOB_KEY = "interact-from-file"
+STORY_LIKES_JOB_KEY = "daily-story-likes"
 POSTS_JOB_KEY = "posts-from-file"
 INTERACT_LIST_KEY = "interact-from-file-list"
+STORY_LIKES_LIST_KEY = "daily-story-likes-list"
 INTERACT_LIMIT_KEY = "interact-from-file-limit"
+STORY_LIKES_LIMIT_KEY = "daily-story-likes-limit"
+STORY_LIKES_ENABLED_KEY = "daily-story-likes-enabled"
+STORY_LIKES_META_FILE = "story_likes.meta.yml"
 POSTS_LIST_KEY = "posts-from-file-list"
 LIKE_LIST_KEY = "like-from-urls-list"
 UNFOLLOW_LIMIT_KEY = "unfollow-from-list"
@@ -165,6 +176,32 @@ def _read_line_list_file(path: Path) -> list[str]:
     ]
 
 
+def _load_story_likes_meta(account_dir: Path) -> dict[str, Any]:
+    path = account_dir / STORY_LIKES_META_FILE
+    if not path.is_file():
+        return {}
+    data = _load_yaml(path)
+    return data if isinstance(data, dict) else {}
+
+
+def _save_story_likes_meta(
+    account_dir: Path, *, enabled: bool, limit: str = ""
+) -> None:
+    payload: dict[str, Any] = {"enabled": bool(enabled)}
+    cleaned_limit = str(limit or "").strip()
+    if cleaned_limit:
+        payload["limit"] = cleaned_limit
+    _save_yaml(account_dir / STORY_LIKES_META_FILE, payload)
+
+
+def _story_likes_from_disk(account_dir: Path) -> tuple[bool, str, list[str]]:
+    meta = _load_story_likes_meta(account_dir)
+    enabled = meta.get("enabled") is True
+    limit = str(meta.get("limit") or "").strip()
+    usernames = _read_line_list_file(account_dir / STORY_LIKES_LIST_FILE)
+    return enabled, limit, usernames
+
+
 def _schema_field_entries() -> list[dict[str, Any]]:
     """Expand compound inline file fields into form keys for load/save."""
     entries: list[dict[str, Any]] = []
@@ -181,6 +218,10 @@ def _schema_field_entries() -> list[dict[str, Any]]:
                         "placeholder": field.get("limit_placeholder", "10-15"),
                     }
                 )
+                if field.get("enable_checkbox"):
+                    entries.append(
+                        {**field, "key": f"{field['key']}-enabled", "type": "bool"}
+                    )
             elif ftype == "inline-lines-file":
                 entries.append({**field, "key": f"{field['key']}-list", "type": "lines"})
             else:
@@ -226,6 +267,39 @@ def hydrate_config_for_ui(data: dict[str, Any], account_id: str) -> dict[str, An
             limit = str(out.pop("interact-usernames-limit", "") or "").strip()
         if limit:
             out[INTERACT_LIMIT_KEY] = limit
+
+    story_usernames = out.get(STORY_LIKES_LIST_KEY)
+    if not isinstance(story_usernames, list) or not story_usernames:
+        story_usernames = _read_line_list_file(account_dir / STORY_LIKES_LIST_FILE)
+        if not story_usernames:
+            merged_story: list[str] = []
+            seen_story: set[str] = set()
+            for entry in _file_job_entries(out.get(STORY_LIKES_JOB_KEY)):
+                filename, _ = _parse_file_job_entry(entry)
+                if filename:
+                    for name in _read_line_list_file(account_dir / filename):
+                        if name not in seen_story:
+                            seen_story.add(name)
+                            merged_story.append(name)
+            story_usernames = merged_story
+        if story_usernames:
+            out[STORY_LIKES_LIST_KEY] = story_usernames
+
+    if not str(out.get(STORY_LIKES_LIMIT_KEY) or "").strip():
+        story_limit = _first_file_job_limit(out.get(STORY_LIKES_JOB_KEY), STORY_LIKES_LIST_FILE)
+        if not story_limit:
+            story_limit = _first_file_job_limit(out.get(STORY_LIKES_JOB_KEY))
+        if not story_limit:
+            story_limit = str(_load_story_likes_meta(account_dir).get("limit") or "").strip()
+        if story_limit:
+            out[STORY_LIKES_LIMIT_KEY] = story_limit
+
+    if STORY_LIKES_ENABLED_KEY not in out:
+        meta = _load_story_likes_meta(account_dir)
+        if meta:
+            out[STORY_LIKES_ENABLED_KEY] = meta.get("enabled") is True
+        else:
+            out[STORY_LIKES_ENABLED_KEY] = bool(_file_job_entries(out.get(STORY_LIKES_JOB_KEY)))
 
     if not str(out.get(UNFOLLOW_LIMIT_KEY) or "").strip():
         limit = _first_file_job_limit(out.get("unfollow-from-file"), UNFOLLOW_LIST_FILENAME)
@@ -281,6 +355,23 @@ def hydrate_config_for_ui(data: dict[str, Any], account_id: str) -> dict[str, An
     return out
 
 
+def _prefer_story_likes_job_order(data: dict[str, Any]) -> dict[str, Any]:
+    """Place daily-story-likes before feed so story checks run early in the session."""
+    if STORY_LIKES_JOB_KEY not in data:
+        return data
+    story_job = data.pop(STORY_LIKES_JOB_KEY)
+    ordered: dict[str, Any] = {}
+    inserted = False
+    for key, value in data.items():
+        if key == "feed" and not inserted:
+            ordered[STORY_LIKES_JOB_KEY] = story_job
+            inserted = True
+        ordered[key] = value
+    if not inserted:
+        ordered[STORY_LIKES_JOB_KEY] = story_job
+    return ordered
+
+
 def sync_config_for_bot(account_id: str, data: dict[str, Any]) -> dict[str, Any]:
     """Write list files and GramAddict file-job keys from dashboard fields."""
     account_dir = _account_dir(account_id)
@@ -294,6 +385,29 @@ def sync_config_for_bot(account_id: str, data: dict[str, Any]) -> dict[str, Any]
         out[INTERACT_JOB_KEY] = [f"{TARGETS_LIST_FILE} {limit}"]
     else:
         out.pop(INTERACT_JOB_KEY, None)
+
+    if STORY_LIKES_ENABLED_KEY in out:
+        story_enabled = bool(out.pop(STORY_LIKES_ENABLED_KEY))
+    else:
+        meta_enabled, meta_limit, _ = _story_likes_from_disk(account_dir)
+        story_enabled = meta_enabled or bool(_file_job_entries(out.get(STORY_LIKES_JOB_KEY)))
+    story_usernames = out.pop(STORY_LIKES_LIST_KEY, None)
+    story_limit = str(out.pop(STORY_LIKES_LIMIT_KEY, None) or "").strip()
+    if not story_limit:
+        story_limit = str(_load_story_likes_meta(account_dir).get("limit") or "").strip()
+    out.pop("daily-story-likes-hours", None)
+    cleaned_story: list[str] = []
+    if isinstance(story_usernames, list):
+        cleaned_story = [str(u).strip().lstrip("@") for u in story_usernames if str(u).strip()]
+    if not cleaned_story:
+        cleaned_story = _read_line_list_file(account_dir / STORY_LIKES_LIST_FILE)
+    if isinstance(story_usernames, list) or cleaned_story:
+        _write_line_list_file(account_dir / STORY_LIKES_LIST_FILE, cleaned_story)
+    _save_story_likes_meta(account_dir, enabled=story_enabled, limit=story_limit)
+    if story_enabled and cleaned_story:
+        out[STORY_LIKES_JOB_KEY] = [f"{STORY_LIKES_LIST_FILE} {story_limit or len(cleaned_story)}"]
+    else:
+        out.pop(STORY_LIKES_JOB_KEY, None)
 
     unfollow_limit = str(out.get(UNFOLLOW_LIMIT_KEY) or "").strip()
     if unfollow_limit:
@@ -335,7 +449,11 @@ def sync_config_for_bot(account_id: str, data: dict[str, Any]) -> dict[str, Any]
         out.pop(POSTS_JOB_KEY, None)
 
     out.pop("like-from-urls", None)
-    return _strip_dashboard_only_keys(out)
+    from GramAddict.core.account_safety import apply_autopost_lock
+
+    return apply_autopost_lock(
+        account_id, _strip_dashboard_only_keys(_prefer_story_likes_job_order(out))
+    )
 
 
 def _value_for_ui(key: str, field: dict[str, Any], value: Any) -> Any:
@@ -405,6 +523,7 @@ def get_field_schema() -> dict[str, Any]:
         "tab_help": ACCOUNT_TAB_HELP,
         "terminology": GRAMADDICT_TERMINOLOGY,
         "collapsed": COLLAPSED_SECTIONS,
+        "autopost_locked_accounts": sorted(AUTOPOST_LOCKED_USERNAMES),
     }
 
 
@@ -435,6 +554,151 @@ def _account_dir(account_id: str) -> Path:
     return folder
 
 
+def _bot_pid_path(account_id: str) -> Path:
+    return _account_dir(account_id) / BOT_PID_FILENAME
+
+
+def _write_bot_pid(account_id: str, pid: int) -> None:
+    path = _bot_pid_path(account_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(str(pid), encoding="utf-8")
+
+
+def _read_bot_pid(account_id: str) -> int | None:
+    path = _bot_pid_path(account_id)
+    if not path.is_file():
+        return None
+    try:
+        return int(path.read_text(encoding="utf-8").strip())
+    except ValueError:
+        return None
+
+
+def _clear_bot_pid(account_id: str) -> None:
+    path = _bot_pid_path(account_id)
+    if path.is_file():
+        path.unlink(missing_ok=True)
+
+
+def _is_pid_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _process_command(pid: int) -> str:
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        return (result.stdout or "").strip()
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _verify_bot_pid(account_id: str, pid: int) -> bool:
+    command = _process_command(pid)
+    if not command or "run.py" not in command:
+        return False
+    config_path = _config_path(account_id)
+    markers = {
+        str(config_path),
+        str(config_path.resolve()),
+        f"accounts/{account_id}/config.yml",
+    }
+    return any(marker in command for marker in markers)
+
+
+def _find_bot_pid_by_scan(account_id: str) -> int | None:
+    config_markers = {
+        str(_config_path(account_id)),
+        str(_config_path(account_id).resolve()),
+        f"accounts/{account_id}/config.yml",
+    }
+    try:
+        result = subprocess.run(
+            ["ps", "-ax", "-o", "pid=,command="],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in (result.stdout or "").splitlines():
+        stripped = line.strip()
+        if not stripped or "run.py" not in stripped:
+            continue
+        if not any(marker in stripped for marker in config_markers):
+            continue
+        try:
+            pid = int(stripped.split(None, 1)[0])
+        except (ValueError, IndexError):
+            continue
+        if _is_pid_running(pid):
+            return pid
+    return None
+
+
+def _resolve_running_bot_pid(account_id: str) -> int | None:
+    proc = _bot_processes.get(account_id)
+    if proc is not None and proc.poll() is None:
+        return proc.pid
+
+    pid = _read_bot_pid(account_id)
+    if pid is not None:
+        if _is_pid_running(pid) and _verify_bot_pid(account_id, pid):
+            return pid
+        _clear_bot_pid(account_id)
+
+    return _find_bot_pid_by_scan(account_id)
+
+
+def _account_bot_running(account_id: str) -> bool:
+    return _resolve_running_bot_pid(account_id) is not None
+
+
+def _kill_pid_tree(pid: int, *, grace_seconds: float = 3.0) -> None:
+    if pid <= 0:
+        return
+
+    def _signal_process(sig: int) -> None:
+        try:
+            os.killpg(os.getpgid(pid), sig)
+            return
+        except (ProcessLookupError, PermissionError):
+            pass
+        except OSError:
+            pass
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            return
+
+    _signal_process(signal.SIGTERM)
+    deadline = time.monotonic() + grace_seconds
+    while time.monotonic() < deadline:
+        if not _is_pid_running(pid):
+            return
+        time.sleep(0.1)
+    _signal_process(signal.SIGKILL)
+
+
+def _finalize_bot_process(account_id: str) -> None:
+    _bot_processes.pop(account_id, None)
+    _clear_bot_pid(account_id)
+
+
 def _filter_field_by_key() -> dict[str, dict[str, Any]]:
     return {
         field["key"]: field
@@ -457,6 +721,20 @@ def filters_for_ui(data: dict[str, Any]) -> dict[str, Any]:
             ui[key] = field.get("default", "")
         else:
             ui[key] = value
+    if "ignore_following_count" not in data:
+        try:
+            ui["ignore_following_count"] = int(data.get("min_followings") or 0) == 0 and int(
+                data.get("max_followings") or 0
+            ) >= 99999
+        except (TypeError, ValueError):
+            pass
+    if "ignore_potency" not in data:
+        try:
+            ui["ignore_potency"] = float(data.get("min_potency_ratio") or 0) == 0 and float(
+                data.get("max_potency_ratio") or 999
+            ) >= 999
+        except (TypeError, ValueError):
+            pass
     return ui
 
 
@@ -515,7 +793,13 @@ def save_account_filters(account_id: str, updates: dict[str, Any]) -> dict[str, 
 def get_account_telegram(account_id: str) -> dict[str, Any]:
     path = _account_dir(account_id) / "telegram.yml"
     data = _load_yaml(path) if path.is_file() else {}
-    form = {field["key"]: data.get(field["key"], "") for field in TELEGRAM_FIELDS}
+    form: dict[str, Any] = {}
+    for field in TELEGRAM_FIELDS:
+        key = field["key"]
+        if field.get("type") == "bool":
+            form[key] = data.get(key, True) is not False
+        else:
+            form[key] = data.get(key, "")
     raw_yaml = path.read_text(encoding="utf-8") if path.is_file() else ""
     return {"form": form, "raw_yaml": raw_yaml}
 
@@ -525,12 +809,19 @@ def save_account_telegram(account_id: str, updates: dict[str, Any]) -> dict[str,
     data = _load_yaml(path) if path.is_file() else {}
     for field in TELEGRAM_FIELDS:
         key = field["key"]
-        if key in updates:
-            text = str(updates[key]).strip()
-            if text:
-                data[key] = text
+        if key not in updates:
+            continue
+        if field.get("type") == "bool":
+            if updates[key]:
+                data[key] = True
             else:
                 data.pop(key, None)
+            continue
+        text = str(updates[key]).strip()
+        if text:
+            data[key] = text
+        else:
+            data.pop(key, None)
     _save_yaml(path, data)
     return get_account_telegram(account_id)
 
@@ -625,8 +916,7 @@ def list_accounts() -> list[dict[str, Any]]:
                 "username": data.get("username") or folder.name,
                 "device": data.get("device") or "",
                 "config_path": str(config_path.relative_to(PROJECT_ROOT)),
-                "running": folder.name in _bot_processes
-                and _bot_processes[folder.name].poll() is None,
+                "running": _account_bot_running(folder.name),
             }
         )
     return accounts
@@ -646,6 +936,7 @@ def create_account(name: str) -> dict[str, Any]:
         for extra in (
             "whitelist.txt",
             "blacklist.txt",
+            "story_likes.txt",
             "comments_list.txt",
             "filters.yml",
             "telegram.yml",
@@ -827,7 +1118,11 @@ def get_account(account_id: str) -> dict[str, Any]:
     config_path = _config_path(account_id)
     if not config_path.is_file():
         raise FileNotFoundError(f"Account not found: {account_id}")
-    data = _load_yaml(config_path)
+    raw_data = _load_yaml(config_path)
+    locked = is_autopost_locked(account_id, str(raw_data.get("username") or ""))
+    data = apply_autopost_lock(account_id, raw_data)
+    if locked and str(raw_data.get("post-reels") or "").strip() not in ("", "0"):
+        _save_account_config_yaml(config_path, data)
     raw_yaml = config_path.read_text(encoding="utf-8")
     post_reel: dict[str, Any] = {}
     post_reel_path = _account_dir(account_id) / "post_reel.yml"
@@ -835,7 +1130,15 @@ def get_account(account_id: str) -> dict[str, Any]:
         post_reel = _load_yaml(post_reel_path)
     hydrated = hydrate_config_for_ui(data, account_id)
     estimate_cfg = dict(data)
-    for ui_key in (INTERACT_LIST_KEY, INTERACT_LIMIT_KEY, POSTS_LIST_KEY, LIKE_LIST_KEY):
+    for ui_key in (
+        INTERACT_LIST_KEY,
+        INTERACT_LIMIT_KEY,
+        POSTS_LIST_KEY,
+        LIKE_LIST_KEY,
+        STORY_LIKES_LIST_KEY,
+        STORY_LIKES_LIMIT_KEY,
+        STORY_LIKES_ENABLED_KEY,
+    ):
         if ui_key in hydrated:
             estimate_cfg[ui_key] = hydrated[ui_key]
     return {
@@ -847,7 +1150,8 @@ def get_account(account_id: str) -> dict[str, Any]:
         "form": config_for_ui(data, account_id),
         "raw_yaml": raw_yaml,
         "estimate": estimate_session(estimate_cfg, post_reel=post_reel),
-        "running": account_id in _bot_processes and _bot_processes[account_id].poll() is None,
+        "running": _account_bot_running(account_id),
+        "autopost_locked": locked,
     }
 
 
@@ -858,6 +1162,7 @@ def save_account_raw_yaml(account_id: str, raw_yaml: str) -> dict[str, Any]:
     data = yaml.safe_load(raw_yaml) or {}
     if not isinstance(data, dict):
         raise ValueError("config.yml must be a YAML mapping")
+    data = sync_config_for_bot(account_id, data)
     _save_account_config_yaml(config_path, data)
     return get_account(account_id)
 
@@ -883,24 +1188,34 @@ def save_account_config(account_id: str, updates: dict[str, Any]) -> dict[str, A
 
 
 def bot_status(account_id: str) -> dict[str, Any]:
-    proc = _bot_processes.get(account_id)
-    running = proc is not None and proc.poll() is None
+    pid = _resolve_running_bot_pid(account_id)
     return {
         "account_id": account_id,
-        "running": running,
+        "running": pid is not None,
+        "pid": pid,
         "logs": _bot_log_buffers.get(account_id, [])[-200:],
     }
 
 
 def stop_bot(account_id: str) -> dict[str, Any]:
     proc = _bot_processes.pop(account_id, None)
-    if proc is None or proc.poll() is not None:
+    pid = None
+    if proc is not None and proc.poll() is None:
+        pid = proc.pid
+    else:
+        pid = _resolve_running_bot_pid(account_id)
+
+    if pid is None:
+        _finalize_bot_process(account_id)
         return {"stopped": False, "message": "Bot is not running"}
-    proc.terminate()
-    try:
-        proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        proc.kill()
+
+    _kill_pid_tree(pid)
+    if proc is not None:
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+    _finalize_bot_process(account_id)
     return {"stopped": True, "message": "Bot stopped"}
 
 
@@ -915,8 +1230,8 @@ async def start_bot(
     if not config_path.is_file():
         raise FileNotFoundError(f"Account not found: {account_id}")
 
-    existing = _bot_processes.get(account_id)
-    if existing is not None and existing.poll() is None:
+    existing_pid = _resolve_running_bot_pid(account_id)
+    if existing_pid is not None:
         raise RuntimeError("Bot is already running for this account")
 
     data = _load_yaml(config_path)
@@ -952,23 +1267,28 @@ async def start_bot(
         text=True,
         bufsize=1,
         env=env,
+        start_new_session=True,
     )
     _bot_processes[account_id] = proc
-    _bot_log_buffers[account_id] = [f"Started GramAddict for {account_id}"]
+    _write_bot_pid(account_id, proc.pid)
+    _bot_log_buffers[account_id] = [f"Started GramAddict for {account_id} (pid {proc.pid})"]
 
     async def _read_output() -> None:
         loop = asyncio.get_running_loop()
         assert proc.stdout is not None
-        while True:
-            line = await loop.run_in_executor(None, proc.stdout.readline)
-            if not line:
-                break
-            line = line.rstrip()
-            _bot_log_buffers.setdefault(account_id, []).append(line)
-            if len(_bot_log_buffers[account_id]) > 500:
-                _bot_log_buffers[account_id] = _bot_log_buffers[account_id][-500:]
-            if log_callback:
-                await log_callback(account_id, line)
+        try:
+            while True:
+                line = await loop.run_in_executor(None, proc.stdout.readline)
+                if not line:
+                    break
+                line = line.rstrip()
+                _bot_log_buffers.setdefault(account_id, []).append(line)
+                if len(_bot_log_buffers[account_id]) > 500:
+                    _bot_log_buffers[account_id] = _bot_log_buffers[account_id][-500:]
+                if log_callback:
+                    await log_callback(account_id, line)
+        finally:
+            _finalize_bot_process(account_id)
 
     asyncio.create_task(_read_output())
     return {
