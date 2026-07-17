@@ -8,10 +8,11 @@
 /.vscode
 */*.yml
 */*.json
+!accounts/
+!accounts/**
 *.pyc
 .DS_Store
 crashes
-accounts
 videos/.tmp/
 !config-examples/*
 .cursor/

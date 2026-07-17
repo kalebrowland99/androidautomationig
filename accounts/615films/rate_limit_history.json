@@ -1,0 +1,23 @@
+{
+  "events": [
+    {
+      "at": "2026-07-15T17:25:29",
+      "job": "daily-story-likes",
+      "break_minutes": 720,
+      "counts": {
+        "likes": 0,
+        "follows": 0,
+        "unfollows": 0,
+        "comments": 0,
+        "pm": 0,
+        "watched": 130,
+        "story_likes": 100,
+        "daily_story_accounts_session": 142,
+        "daily_story_accounts_today": 198,
+        "interactions": 0
+      },
+      "note": "backfilled from session logs"
+    }
+  ],
+  "updated_at": "2026-07-16T22:09:10"
+}

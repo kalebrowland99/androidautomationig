@@ -1,0 +1,58 @@
+{
+    "d1ce_vi": {
+        "last_interaction": "2026-07-12 22:35:29.819825",
+        "following_status": "none",
+        "session_id": "a94a624e-5a04-49c9-b52d-9fb2a6845d64",
+        "job_name": "blogger-post-likers",
+        "target": "themonroeon415th",
+        "liked": 0,
+        "watched": 0,
+        "commented": 0,
+        "followed": false,
+        "unfollowed": false,
+        "scraped": false,
+        "pm_sent": false
+    },
+    "mckennareesephotography": {
+        "last_interaction": "2026-07-12 22:40:09.876386",
+        "following_status": "followed",
+        "session_id": "a94a624e-5a04-49c9-b52d-9fb2a6845d64",
+        "job_name": "blogger-post-likers",
+        "target": "themonroeon415th",
+        "liked": 2,
+        "watched": 0,
+        "commented": 1,
+        "followed": true,
+        "unfollowed": false,
+        "scraped": false,
+        "pm_sent": false
+    },
+    "inspoforreelz": {
+        "last_interaction": "2026-07-12 22:44:51.655811",
+        "following_status": "followed",
+        "session_id": "a94a624e-5a04-49c9-b52d-9fb2a6845d64",
+        "job_name": "blogger-post-likers",
+        "target": "themonroeon415th",
+        "liked": 2,
+        "watched": 0,
+        "commented": 1,
+        "followed": true,
+        "unfollowed": false,
+        "scraped": false,
+        "pm_sent": false
+    },
+    "saraconatserrr": {
+        "last_interaction": "2026-07-12 22:49:19.793040",
+        "following_status": "none",
+        "session_id": "a94a624e-5a04-49c9-b52d-9fb2a6845d64",
+        "job_name": "blogger-post-likers",
+        "target": "themonroeon415th",
+        "liked": 1,
+        "watched": 0,
+        "commented": 1,
+        "followed": false,
+        "unfollowed": false,
+        "scraped": false,
+        "pm_sent": false
+    }
+}

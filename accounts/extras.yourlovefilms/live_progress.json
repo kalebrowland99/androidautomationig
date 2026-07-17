@@ -1,0 +1,20 @@
+{
+  "username": "extras.yourlovefilms",
+  "running": true,
+  "current_job": "blogger-followers",
+  "updated_at": "2026-07-13T21:05:45",
+  "session_started_at": "2026-07-13T20:24:26",
+  "total_likes": 6,
+  "total_followed": 3,
+  "total_unfollowed": 0,
+  "total_watched": 2,
+  "total_comments": 3,
+  "total_pm": 0,
+  "total_interactions": 12,
+  "limits": {
+    "likes": 115,
+    "follows": 45,
+    "watches": 136,
+    "comments": 93
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "username": "more.yourlovefilms",
+  "running": true,
+  "current_job": "session",
+  "updated_at": "2026-07-13T21:24:26",
+  "session_started_at": "2026-07-13T21:23:46",
+  "total_likes": 0,
+  "total_followed": 0,
+  "total_unfollowed": 0,
+  "total_watched": 0,
+  "total_comments": 0,
+  "total_pm": 0,
+  "total_interactions": 0,
+  "limits": {
+    "likes": 82,
+    "follows": 42,
+    "watches": 130,
+    "comments": 96
+  }
+}

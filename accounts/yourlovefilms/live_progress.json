@@ -1,0 +1,25 @@
+{
+  "username": "yourlovefilms",
+  "running": true,
+  "current_job": "blogger-followers",
+  "sleeping": true,
+  "next_session_at": "2026-07-15T19:49:13",
+  "updated_at": "2026-07-15T19:15:13",
+  "session_started_at": "2026-07-15T18:03:19",
+  "total_likes": 7,
+  "total_followed": 4,
+  "total_unfollowed": 0,
+  "total_watched": 2,
+  "total_story_likes": 1,
+  "total_daily_story_accounts": 0,
+  "daily_story_likes_limit": null,
+  "total_comments": 4,
+  "total_pm": 0,
+  "total_interactions": 7,
+  "limits": {
+    "likes": 82,
+    "follows": 116,
+    "watches": 149,
+    "comments": 86
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "username": "Spam",
+  "running": true,
+  "current_job": "blogger-followers",
+  "sleeping": false,
+  "next_session_at": null,
+  "updated_at": "2026-07-15T15:12:40",
+  "session_started_at": "2026-07-15T15:09:43",
+  "total_likes": 1,
+  "total_followed": 0,
+  "total_unfollowed": 0,
+  "total_watched": 0,
+  "total_comments": 0,
+  "total_pm": 0,
+  "total_interactions": 0,
+  "limits": {
+    "likes": 93,
+    "follows": 150,
+    "watches": 135,
+    "comments": 83
+  }
+}

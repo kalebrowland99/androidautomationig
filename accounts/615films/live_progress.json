@@ -1,0 +1,25 @@
+{
+  "username": "615films",
+  "running": true,
+  "current_job": "daily-story-likes",
+  "sleeping": false,
+  "next_session_at": null,
+  "updated_at": "2026-07-15T17:25:43",
+  "session_started_at": "2026-07-15T16:44:35",
+  "total_likes": 0,
+  "total_followed": 0,
+  "total_unfollowed": 0,
+  "total_watched": 0,
+  "total_story_likes": 0,
+  "total_daily_story_accounts": 198,
+  "daily_story_likes_limit": 500,
+  "total_comments": 0,
+  "total_pm": 0,
+  "total_interactions": 0,
+  "limits": {
+    "likes": 117,
+    "follows": 137,
+    "watches": 500,
+    "comments": 113
+  }
+}
