@@ -20,6 +20,7 @@ class Device:
     serial: str
     model: str = ""
     manufacturer: str = ""
+    hardware_id: str = ""
 
     @property
     def label(self) -> str:
@@ -87,6 +88,32 @@ def serial_matches_filter(serial: str, pattern: str) -> bool:
     return serial.endswith(pattern)
 
 
+def get_hardware_id(adb: str, serial: str) -> str:
+    """Stable per-phone id that survives ADB serial / wireless IP changes.
+
+    Uses the hardware serial number (ro.serialno / ro.boot.serialno); falls back
+    to the Android secure id. Returns "" if none can be read.
+    """
+    getprops = ("ro.serialno", "ro.boot.serialno")
+    for prop in getprops:
+        try:
+            value = run_command(
+                [adb, "-s", serial, "shell", "getprop", prop], timeout=3
+            ).strip()
+        except (RuntimeError, subprocess.TimeoutExpired):
+            continue
+        if value:
+            return value
+    try:
+        value = run_command(
+            [adb, "-s", serial, "shell", "settings", "get", "secure", "android_id"],
+            timeout=3,
+        ).strip()
+    except (RuntimeError, subprocess.TimeoutExpired):
+        value = ""
+    return value if value and value.lower() != "null" else ""
+
+
 def list_devices(
     adb: str,
     *,
@@ -101,6 +128,7 @@ def list_devices(
     for serial in serials:
         model = ""
         manufacturer = ""
+        hardware_id = ""
         if include_props:
             try:
                 model = run_command(
@@ -113,7 +141,15 @@ def list_devices(
                 ).strip()
             except (RuntimeError, subprocess.TimeoutExpired):
                 pass
-        devices.append(Device(serial=serial, model=model, manufacturer=manufacturer))
+            hardware_id = get_hardware_id(adb, serial)
+        devices.append(
+            Device(
+                serial=serial,
+                model=model,
+                manufacturer=manufacturer,
+                hardware_id=hardware_id,
+            )
+        )
     return devices
 
 

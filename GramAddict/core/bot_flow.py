@@ -21,7 +21,11 @@ from GramAddict.core.log import (
 from GramAddict.core.navigation import check_if_english
 from GramAddict.core.persistent_list import PersistentList
 from GramAddict.core.report import print_full_report
-from GramAddict.core.session_state import SessionState, SessionStateEncoder
+from GramAddict.core.session_state import (
+    SessionState,
+    SessionStateEncoder,
+    follows_today,
+)
 from GramAddict.core.storage import Storage
 from GramAddict.core.utils import (
     ask_for_a_donation,
@@ -51,6 +55,7 @@ from GramAddict.core.utils import (
     stop_bot,
     wait_for_next_session,
 )
+from GramAddict.core.utils import InstagramRateLimitError, take_rate_limit_break
 from GramAddict.core.views import AccountView, ProfileView, TabBarView, UniversalActions
 from GramAddict.core.views import load_config as load_views
 
@@ -122,12 +127,51 @@ def start_bot(**kwargs):
         )
         if not inside_working_hours:
             wait_for_next_session(time_left, session_state, sessions, device)
+
+        # Daily follow cap: enforce a hard per-calendar-day follow limit across
+        # all sessions. If today's quota is already spent, don't start a new
+        # session — sleep and re-check (the count resets after midnight).
+        daily_follow_cap = int(
+            get_value(configs.args.total_follows_limit_daily, None, 0) or 0
+        )
+        follows_done_today = 0
+        if daily_follow_cap > 0:
+            account_username = configs.username or getattr(
+                configs.args, "username", None
+            )
+            follows_done_today = follows_today(account_username)
+            if follows_done_today >= daily_follow_cap:
+                nap_minutes = get_value(configs.args.repeat, None, 30) or 30
+                logger.info(
+                    f"Daily follow cap reached ({follows_done_today}/"
+                    f"{daily_follow_cap}). Skipping this session; re-checking in "
+                    f"{nap_minutes} min (resets after midnight).",
+                    extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
+                )
+                try:
+                    sleep(nap_minutes * 60)
+                except KeyboardInterrupt:
+                    stop_bot(device, sessions, session_state, was_sleeping=True)
+                continue
+
         pre_post_script(path=configs.args.pre_script)
         if configs.args.restart_atx_agent:
             restart_atx_agent(device)
         get_device_info(device)
         session_state = SessionState(configs)
         session_state.set_limits_session()
+        # Trim this session's follow limit to the remaining daily allowance so
+        # the sum across sessions never exceeds the daily cap.
+        if daily_follow_cap > 0:
+            remaining_today = max(0, daily_follow_cap - follows_done_today)
+            session_state.args.current_follow_limit = min(
+                int(session_state.args.current_follow_limit), remaining_today
+            )
+            logger.info(
+                f"Daily follows: {follows_done_today}/{daily_follow_cap} used — "
+                f"this session may follow up to "
+                f"{session_state.args.current_follow_limit}.",
+            )
         sessions.append(session_state)
         check_screen_timeout()
         device.wake_up()
@@ -150,6 +194,12 @@ def start_bot(**kwargs):
                 stop_bot(device, sessions, session_state, was_sleeping=False)
 
         logger.info("Device screen ON and unlocked.")
+        # Lock portrait first, then clean slate: kill all running apps and go to
+        # the Android home screen before doing anything else (VPN, opening
+        # Instagram, etc.).
+        device.disable_auto_rotate()
+        logger.info("Closing all apps and returning to the home screen.")
+        device.close_all_apps()
         if configs.args.ensure_vpn:
             vpn_app = configs.args.vpn_app_name or "Shadowrocket"
             if not ensure_shadowrocket_vpn(device, vpn_app):
@@ -165,8 +215,10 @@ def start_bot(**kwargs):
             try:
                 running_ig_version = get_instagram_version()
                 logger.info(f"Instagram version: {running_ig_version}")
-                if tuple(running_ig_version.split(".")) > tuple(
-                    __tested_ig_version__.split(".")
+                if (
+                    tuple(running_ig_version.split("."))
+                    > tuple(__tested_ig_version__.split("."))
+                    and not configs.args.allow_untested_ig_version
                 ):
                     logger.warning(
                         f"You have a newer version of IG then the one tested! (Tested version: {__tested_ig_version__}).",
@@ -175,14 +227,13 @@ def start_bot(**kwargs):
                     logger.warning(
                         "Using an untested version of IG would cause unexpected behavior because some elements in the user interface may have been changed. Any crashes that occur with an untested version are not taken into account."
                     )
-                    if not configs.args.allow_untested_ig_version:
-                        logger.warning(
-                            "If you press ENTER, you are aware of this and will not ask for support in case of a crash."
-                        )
-                        logger.warning(
-                            "If you want to avoid pressing ENTER next run, add allow-untested-ig-version: true in your config.yml file. (read the docs for more info)"
-                        )
-                        input()
+                    logger.warning(
+                        "If you press ENTER, you are aware of this and will not ask for support in case of a crash."
+                    )
+                    logger.warning(
+                        "If you want to avoid pressing ENTER next run, add allow-untested-ig-version: true in your config.yml file. (read the docs for more info)"
+                    )
+                    input()
 
             except Exception as e:
                 logger.error(f"Error retrieving the IG version. Exception: {e}")
@@ -193,6 +244,13 @@ def start_bot(**kwargs):
         profile_view = ProfileView(device)
         account_view = AccountView(device)
         tab_bar_view = TabBarView(device)
+        # Always start each session on the Home feed, before any job runs, so
+        # every bot begins from a known screen (navigation and the create/+
+        # button are only reliable from Home).
+        try:
+            tab_bar_view.navigateToHome()
+        except Exception as e:
+            logger.debug(f"Could not navigate to Home at session start: {e}")
         try:
             account_view.navigate_to_main_account()
             check_if_english(device)
@@ -295,6 +353,7 @@ def start_bot(**kwargs):
         show_ending_conditions()
         if not configs.args.debug:
             countdown(10, "Bot will start in: ")
+        rate_limited = False
         for plugin in jobs_list:
             inside_working_hours, time_left = SessionState.inside_working_hours(
                 configs.args.working_hours, configs.args.time_delta_session
@@ -343,9 +402,14 @@ def start_bot(**kwargs):
                     running=True,
                     current_job=plugin,
                 )
-                configs.actions[plugin].run(
-                    device, configs, storage, sessions, filters, plugin
-                )
+                try:
+                    configs.actions[plugin].run(
+                        device, configs, storage, sessions, filters, plugin
+                    )
+                except InstagramRateLimitError as exc:
+                    logger.warning(str(exc))
+                    rate_limited = True
+                    break
                 write_live_progress(
                     session_state.my_username,
                     session_state,
@@ -383,9 +447,14 @@ def start_bot(**kwargs):
                     logger.warning(
                         "You're in scraping mode! That means you're only collection data without interacting!"
                     )
-                configs.actions[plugin].run(
-                    device, configs, storage, sessions, filters, plugin
-                )
+                try:
+                    configs.actions[plugin].run(
+                        device, configs, storage, sessions, filters, plugin
+                    )
+                except InstagramRateLimitError as exc:
+                    logger.warning(str(exc))
+                    rate_limited = True
+                    break
                 write_live_progress(
                     session_state.my_username,
                     session_state,
@@ -393,6 +462,18 @@ def start_bot(**kwargs):
                     current_job=plugin,
                 )
                 print_limits = True
+
+        if rate_limited:
+            session_state.finishTime = datetime.now()
+            write_live_progress(
+                session_state.my_username,
+                session_state,
+                running=False,
+                current_job=None,
+            )
+            sessions.persist(directory=session_state.my_username)
+            take_rate_limit_break(device, session_state, sessions, configs)
+            continue
 
         # save the session in sessions.json
         session_state.finishTime = datetime.now()
@@ -456,8 +537,18 @@ def start_bot(**kwargs):
                     following_now,
                     time_left,
                 )
+                next_session_at = datetime.now() + timedelta(seconds=time_left)
                 logger.info(
-                    f'Next session will start at: {(datetime.now() + timedelta(seconds=time_left)).strftime("%I:%M:%S %p (%Y/%m/%d)")}.'
+                    f'Next session will start at: {next_session_at.strftime("%I:%M:%S %p (%Y/%m/%d)")}.'
+                )
+                # Mark the account as sleeping between sessions so the dashboard
+                # can show a 💤 tag until it wakes for the next session.
+                write_live_progress(
+                    session_state.my_username,
+                    session_state,
+                    running=True,
+                    sleeping=True,
+                    next_session_at=next_session_at.isoformat(timespec="seconds"),
                 )
                 try:
                     sleep(time_left)

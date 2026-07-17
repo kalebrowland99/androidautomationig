@@ -17,6 +17,8 @@ FILENAME_INTERACTED_USERS = "interacted_users.json"
 OLD_FILTER = "filter.json"
 FILTER = "filters.yml"
 USER_LAST_INTERACTION = "last_interaction"
+USER_LAST_COMMENTED = "last_commented"
+USER_LAST_STORY_CHECK = "last_story_check"
 USER_FOLLOWING_STATUS = "following_status"
 
 FILENAME_WHITELIST = "whitelist.txt"
@@ -34,6 +36,11 @@ class Storage:
             return
         self.my_username = my_username
         self.brand_pool = brand_pool
+        # Usernames this process has interacted with this session. Used to merge
+        # only our own changes into the shared brand-pool file so that a
+        # simultaneously-running account in the same pool doesn't get its entries
+        # clobbered by a full-file overwrite.
+        self._pool_dirty_users: set[str] = set()
         self.account_path = os.path.join(ACCOUNTS, my_username)
         if not os.path.exists(self.account_path):
             os.makedirs(self.account_path)
@@ -140,6 +147,68 @@ class Storage:
         )
         return True, last_interaction
 
+    def can_comment_user(self, username, cooldown_days: Optional[Union[int, float]]) -> bool:
+        """True when this user is outside the comment cooldown window."""
+        if cooldown_days is None or cooldown_days <= 0:
+            return True
+        user = self.interacted_users.get(username)
+        if not user:
+            return True
+        last_commented = user.get(USER_LAST_COMMENTED)
+        if not last_commented:
+            return True
+        last_dt = datetime.strptime(last_commented, "%Y-%m-%d %H:%M:%S.%f")
+        return datetime.now() - last_dt >= timedelta(days=cooldown_days)
+
+    def check_user_story_cooldown(
+        self, username, hours: Optional[Union[int, float]]
+    ) -> tuple[bool, Optional[datetime]]:
+        """Return (on_cooldown, last_check_time) for daily story likes."""
+        if hours is None or hours <= 0:
+            return False, None
+        user = self.interacted_users.get(username)
+        if not user:
+            return False, None
+        last_story_check = user.get(USER_LAST_STORY_CHECK)
+        if not last_story_check:
+            return False, None
+        last_dt = datetime.strptime(last_story_check, "%Y-%m-%d %H:%M:%S.%f")
+        if datetime.now() - last_dt < timedelta(hours=hours):
+            return True, last_dt
+        return False, last_dt
+
+    def story_checked_today(self, username: str) -> bool:
+        """True when this user was already visited by daily story likes today."""
+        user = self.interacted_users.get(username)
+        if not user:
+            return False
+        last_story_check = user.get(USER_LAST_STORY_CHECK)
+        if not last_story_check:
+            return False
+        try:
+            last_dt = datetime.strptime(last_story_check, "%Y-%m-%d %H:%M:%S.%f")
+        except ValueError:
+            return False
+        return last_dt.date() == datetime.now().date()
+
+    def count_story_checks_today_in_list(self, usernames: list[str]) -> int:
+        count = 0
+        for raw in usernames:
+            username = raw.strip().lstrip("@")
+            if username and self.story_checked_today(username):
+                count += 1
+        return count
+
+    def record_story_check(self, username, session_id, when: Optional[datetime] = None):
+        """Track a story-like visit without resetting profile interaction time."""
+        stamp = (when or datetime.now()).strftime("%Y-%m-%d %H:%M:%S.%f")
+        user = self.interacted_users.get(username, {})
+        user[USER_LAST_STORY_CHECK] = stamp
+        user["session_id"] = session_id
+        self.interacted_users[username] = user
+        self._pool_dirty_users.add(username)
+        self._update_file()
+
     def get_following_status(self, username):
         user = self.interacted_users.get(username)
         if user is None:
@@ -209,6 +278,8 @@ class Storage:
         user["commented"] = (
             commented if "commented" not in user else (user["commented"] + commented)
         )
+        if commented and commented > 0:
+            user[USER_LAST_COMMENTED] = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
 
         # Update the followed or unfollowed boolean only if we have a real update
         user["followed"] = (
@@ -233,6 +304,7 @@ class Storage:
             else user["pm_sent"]
         )
         self.interacted_users[username] = user
+        self._pool_dirty_users.add(username)
         self._update_file()
 
     def is_user_in_whitelist(self, username):
@@ -254,11 +326,40 @@ class Storage:
         return count
 
     def _update_file(self):
-        if self.interacted_users_path is not None:
-            with atomic_write(
-                self.interacted_users_path, overwrite=True, encoding="utf-8"
-            ) as outfile:
-                json.dump(self.interacted_users, outfile, indent=4, sort_keys=False)
+        if self.interacted_users_path is None:
+            return
+
+        # Brand pool: the file is shared across accounts that may run at the same
+        # time. Re-read the current file and overlay ONLY the users this process
+        # touched, so we never wipe entries another account added concurrently.
+        if self.brand_pool:
+            merged = {}
+            if os.path.isfile(self.interacted_users_path):
+                try:
+                    with open(self.interacted_users_path, encoding="utf-8") as handle:
+                        loaded = json.load(handle)
+                    if isinstance(loaded, dict):
+                        merged = loaded
+                except (json.JSONDecodeError, OSError) as exc:
+                    logger.warning(
+                        f"Could not re-read shared pool file for merge ({exc}); "
+                        "writing our copy instead."
+                    )
+                    merged = dict(self.interacted_users)
+            for username in self._pool_dirty_users:
+                if username in self.interacted_users:
+                    merged[username] = self.interacted_users[username]
+            # Keep our in-memory view consistent with what's now on disk so later
+            # reads (e.g. re-interaction checks) see other accounts' entries too.
+            self.interacted_users = merged
+            data_to_write = merged
+        else:
+            data_to_write = self.interacted_users
+
+        with atomic_write(
+            self.interacted_users_path, overwrite=True, encoding="utf-8"
+        ) as outfile:
+            json.dump(data_to_write, outfile, indent=4, sort_keys=False)
 
 
 @unique

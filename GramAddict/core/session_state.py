@@ -1,4 +1,6 @@
+import json
 import logging
+import os
 import uuid
 from datetime import datetime, timedelta
 from enum import Enum, auto
@@ -7,6 +9,36 @@ from json import JSONEncoder
 from GramAddict.core.utils import get_value
 
 logger = logging.getLogger(__name__)
+
+
+def follows_today(username) -> int:
+    """Total follows already done today (this calendar date) across all sessions.
+
+    Read from accounts/<username>/sessions.json, which GramAddict persists after
+    every session — so this survives process restarts and lets a per-day follow
+    cap be enforced even though the per-session counters reset each session.
+    The in-progress session isn't persisted yet, so this reflects prior sessions.
+    """
+    if not username:
+        return 0
+    path = os.path.join("accounts", str(username), "sessions.json")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return 0
+    if not isinstance(data, list):
+        return 0
+    today = datetime.now().strftime("%Y-%m-%d")
+    total = 0
+    for item in data:
+        if str(item.get("start_time", ""))[:10] != today:
+            continue
+        try:
+            total += int(item.get("total_followed") or 0)
+        except (TypeError, ValueError):
+            continue
+    return total
 
 
 class SessionState:
@@ -23,6 +55,9 @@ class SessionState:
     totalComments = 0
     totalPm = 0
     totalWatched = 0
+    totalStoryLikes = 0
+    totalDailyStoryAccounts = 0
+    daily_story_likes_limit = None
     totalUnfollowed = 0
     removedMassFollowers = []
     totalScraped = 0
@@ -44,6 +79,9 @@ class SessionState:
         self.totalComments = 0
         self.totalPm = 0
         self.totalWatched = 0
+        self.totalStoryLikes = 0
+        self.totalDailyStoryAccounts = 0
+        self.daily_story_likes_limit = None
         self.totalUnfollowed = 0
         self.removedMassFollowers = []
         self.totalScraped = {}
@@ -75,6 +113,31 @@ class SessionState:
             if scraped:
                 self.totalScraped[source] += 1
                 self.successfulInteractions[source] += 1
+
+        # Push a live snapshot after each interacted user so the dashboard shows
+        # follows/likes/comments climbing in near-real-time (not just per job).
+        self._publish_live_progress()
+
+    def register_story_like(self) -> None:
+        """Count a story segment liked during normal profile interactions."""
+        self.totalStoryLikes += 1
+        self._publish_live_progress()
+
+    def register_daily_story_account(self) -> None:
+        """Count one account visited by the daily-story-likes job."""
+        self.totalDailyStoryAccounts += 1
+        self._publish_live_progress()
+
+    def _publish_live_progress(self):
+        if not self.my_username:
+            return
+        try:
+            from GramAddict.core.live_progress import write_live_progress
+
+            write_live_progress(self.my_username, self, running=True)
+        except Exception:
+            # Progress reporting must never interrupt the interaction loop.
+            pass
 
     def set_limits_session(
         self,
@@ -310,6 +373,9 @@ class SessionStateEncoder(JSONEncoder):
             "total_comments": session_state.totalComments,
             "total_pm": session_state.totalPm,
             "total_watched": session_state.totalWatched,
+            "total_story_likes": session_state.totalStoryLikes,
+            "total_daily_story_accounts": session_state.totalDailyStoryAccounts,
+            "daily_story_likes_limit": session_state.daily_story_likes_limit,
             "total_unfollowed": session_state.totalUnfollowed,
             "total_scraped": session_state.totalScraped,
             "start_time": str(session_state.startTime),

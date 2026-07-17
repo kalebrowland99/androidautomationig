@@ -48,7 +48,7 @@
             --brand: #6366f1;
         }
     </style>
-    <link rel="stylesheet" href="/static/dashboard.css?v=38">
+    <link rel="stylesheet" href="/static/dashboard.css?v=49">
 </head>
 <body class="min-h-screen bg-white text-foreground antialiased brand-gramaddict">
     <div id="page-banner"></div>
@@ -79,15 +79,22 @@
             <div class="context-strip-left flex flex-wrap items-center gap-x-4 gap-y-1 text-xs shrink-0">
                 <span class="context-item context-item-phone">
                     <span class="context-label">Phone</span>
-                    <select id="ctx-phone-select" class="ctx-phone-select ga-input hidden" aria-label="Active phone" onchange="onCtxPhoneChange()"></select>
                     <strong id="ctx-phone" class="ctx-phone-text">None selected</strong>
                 </span>
-                <span class="context-item"><span class="context-label">Account</span> <strong id="ctx-account">None</strong></span>
+                <span class="context-item context-item-account">
+                    <span class="context-label">Account</span>
+                    <select id="ctx-account-select" class="ctx-account-select ga-input hidden" aria-label="Active account" onchange="onCtxAccountChange()"></select>
+                    <strong id="ctx-account" class="ctx-account-text">None</strong>
+                    <button type="button" class="ctx-add-account btn-icon btn-ghost" onclick="createGaAccount()" aria-label="New account" title="New account">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+                    </button>
+                </span>
                 <span id="ctx-status" class="context-status idle">Idle</span>
             </div>
             <div class="context-strip-actions flex flex-wrap gap-2 shrink-0 ml-auto">
                 <button type="button" class="btn-ghost btn-sm" id="btn-ctx-quick-debug" onclick="runQuickDebug()" disabled title="Run last debug step from Tools">Debug</button>
                 <button type="button" class="btn-ghost btn-sm" id="btn-ctx-mirror" onclick="mirrorSelected()" disabled>Mirror</button>
+                <button type="button" class="btn-ghost btn-sm" id="btn-ctx-disable" onclick="toggleAccountDisabled()" disabled title="Pause this account">Disable</button>
             </div>
         </div>
         </div>
@@ -152,15 +159,24 @@
                         </div>
                     </div>
 
-                    <div class="lg:col-span-3 farm-log rounded-3xl border p-4 md:p-5 shadow-sm bg-background flex flex-col min-h-[24rem]">
-                        <div class="flex items-center justify-between mb-3 shrink-0">
-                            <h2 class="text-sm font-semibold">Activity log</h2>
-                            <div class="flex gap-2">
-                                <button type="button" class="btn-ghost" id="btn-autoscroll" onclick="toggleAutoscroll()">Auto-scroll</button>
-                                <button type="button" class="btn-ghost" onclick="clearLog()">Clear</button>
+                    <div class="lg:col-span-3 farm-log-column rounded-3xl border p-4 md:p-5 shadow-sm bg-background flex flex-col h-[24rem] max-h-[28rem] overflow-hidden">
+                        <div class="farm-log-panel flex flex-col flex-1 min-h-0">
+                            <div class="flex items-center justify-between mb-3 shrink-0">
+                                <h2 class="text-sm font-semibold">Activity log</h2>
+                                <div class="flex gap-2">
+                                    <button type="button" class="btn-ghost" id="btn-autoscroll" onclick="toggleAutoscroll()">Auto-scroll</button>
+                                    <button type="button" class="btn-ghost" onclick="clearLog()">Clear</button>
+                                </div>
                             </div>
+                            <div id="unified-log" class="farm-log-scroll flex-1 overflow-y-auto pr-1 min-h-0"></div>
                         </div>
-                        <div id="unified-log" class="flex-1 overflow-y-auto pr-1 min-h-0"></div>
+                        <div id="story-likes-log-panel" class="farm-story-log-panel hidden flex flex-col min-h-0 overflow-hidden">
+                            <div class="flex items-center justify-between mb-2 shrink-0">
+                                <h2 class="text-sm font-semibold">Daily story likes</h2>
+                                <button type="button" class="btn-ghost btn-sm" onclick="clearStoryLikesLog()">Clear</button>
+                            </div>
+                            <div id="story-likes-log" class="farm-story-log-scroll overflow-y-auto pr-1 min-h-0"></div>
+                        </div>
                     </div>
                 </div>
 
@@ -184,39 +200,67 @@
                         <p class="account-page-lead">Settings autosave. Use search in the sidebar to jump to any field.</p>
                     </header>
 
-                    <div id="account-session-estimate" class="account-session-estimate hidden" aria-live="polite">
-                        <div class="account-estimate-stats ctx-est-stats">
-                            <span class="ctx-est-stat" title="Estimated length of one GramAddict session (START → jobs → FINISH)">
-                                <span class="ctx-est-label">Session</span>
-                                <strong data-est="duration">—</strong>
+                    <div id="account-templates-bar" class="account-template-status hidden">
+                        <div class="account-template-status-main">
+                            <span class="account-template-status-icon" aria-hidden="true">
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
                             </span>
-                            <span class="ctx-est-divider" aria-hidden="true">·</span>
-                            <span class="ctx-est-stat" title="Which limit will likely end the session first">
-                                <span class="ctx-est-label">Stops at</span>
-                                <strong data-est="binding">—</strong>
-                            </span>
-                            <span class="ctx-est-divider" aria-hidden="true">·</span>
-                            <span class="ctx-est-stat" title="Profile visits before session caps">
-                                <span class="ctx-est-label">Profiles</span>
-                                <strong data-est="profiles">—</strong>
-                            </span>
-                            <span data-est="warn-badge" class="ctx-est-warn-badge hidden" title=""></span>
+                            <div class="account-template-status-text">
+                                <span class="account-template-status-label">Settings template</span>
+                                <span id="account-applied-template" class="account-template-status-value">No template applied</span>
+                            </div>
                         </div>
-                        <p class="ctx-est-schedule account-estimate-schedule" data-est="schedule"></p>
+                        <button type="button" class="btn-ghost btn-sm btn-primary-outline" id="btn-manage-templates">Browse templates</button>
+                    </div>
+
+                    <div id="account-session-estimate" class="account-session-estimate hidden is-collapsed" aria-live="polite">
+                        <button type="button" class="account-estimate-toggle" id="btn-estimate-toggle" aria-expanded="false" onclick="toggleSessionEstimate()">
+                            <span class="account-estimate-toggle-left">
+                                <span class="account-estimate-toggle-title">Session estimate</span>
+                                <span class="account-estimate-toggle-summary" data-est="summary"></span>
+                                <span data-est="warn-badge" class="ctx-est-warn-badge hidden" title=""></span>
+                            </span>
+                            <svg class="account-estimate-chevron" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+                        </button>
+                        <div class="account-estimate-body">
+                            <div class="account-estimate-ai">
+                                <div class="account-estimate-outcomes hidden" data-est="outcomes" aria-live="polite"></div>
+                            </div>
+                            <div class="account-estimate-stats ctx-est-stats">
+                                <span class="ctx-est-stat" title="Estimated length of one GramAddict session (START → jobs → FINISH)">
+                                    <span class="ctx-est-label">Session</span>
+                                    <strong data-est="duration">—</strong>
+                                </span>
+                                <span class="ctx-est-divider" aria-hidden="true">·</span>
+                                <span class="ctx-est-stat ctx-est-stat-profiles" data-est="profiles-stat">
+                                    <span class="ctx-est-stat-head">
+                                        <span class="ctx-est-label" data-est="profiles-label">Profile visits</span>
+                                        <strong data-est="profiles">—</strong>
+                                    </span>
+                                    <span class="ctx-est-stat-detail hidden" data-est="profiles-detail"></span>
+                                </span>
+                            </div>
+                            <p class="ctx-est-schedule account-estimate-schedule" data-est="schedule"></p>
+                        </div>
+                    </div>
+
+                    <div id="account-notes" class="account-notes hidden">
+                        <div class="account-notes-head">
+                            <span class="account-notes-title">Notes</span>
+                            <span id="account-notes-status" class="account-notes-status" aria-live="polite"></span>
+                        </div>
+                        <textarea id="account-notes-input" class="account-notes-input ga-input"
+                                  rows="3" placeholder="Add notes for this account (login, ban history, proxy, reminders…)"
+                                  oninput="onAccountNoteInput()" onblur="saveAccountNote()"></textarea>
                     </div>
 
                     <p id="ga-no-accounts" class="account-empty-state">No accounts yet — create one on Farm or use + below.</p>
 
                     <div id="ga-config-fields" class="account-shell hidden">
                         <aside class="account-sidebar">
-                            <div class="account-picker">
-                                <label for="ga-account-select" class="account-picker-label"><code class="ga-field-key">username</code></label>
-                                <div class="account-picker-row">
-                                    <select id="ga-account-select" class="ga-input account-picker-select" onchange="onGaAccountChange()"></select>
-                                    <button type="button" class="btn-icon btn-ghost" onclick="createGaAccount()" aria-label="New account" title="New account">
-                                        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
-                                    </button>
-                                </div>
+                            <div class="sr-only">
+                                <label for="ga-account-select">Account</label>
+                                <select id="ga-account-select" onchange="onGaAccountChange()"></select>
                             </div>
 
                             <nav class="account-nav" id="account-subnav" aria-label="Account sections" role="tablist">
@@ -265,25 +309,6 @@
                                 <div id="account-setting-results" class="account-setting-results hidden" role="listbox"></div>
                             </div>
 
-                            <div class="account-templates-block">
-                                <span class="account-nav-label">Settings templates</span>
-                                <p class="account-templates-hint">Copies everything on the account (jobs, limits, filters, posting, comments, lists). Only this account’s username and phone link stay.</p>
-                                <div class="account-templates-save">
-                                    <input type="text" id="template-save-name" class="ga-input" placeholder="Template name" autocomplete="off">
-                                    <button type="button" class="btn-ghost btn-sm" id="btn-save-template">Save as template</button>
-                                </div>
-                                <div class="account-templates-load">
-                                    <select id="template-load-source" class="ga-input">
-                                        <option value="">Load from…</option>
-                                    </select>
-                                    <label class="ga-check account-templates-check">
-                                        <input type="checkbox" class="ui-checkbox" id="template-include-lists" checked>
-                                        <span class="ga-check-label">Include username lists</span>
-                                    </label>
-                                    <button type="button" class="btn-ghost btn-sm" id="btn-apply-settings">Apply</button>
-                                </div>
-                            </div>
-
                             <button type="button" class="account-delete-btn btn-ghost btn-kill" id="btn-delete-account" onclick="deleteGaAccount()" disabled aria-label="Delete account">
                                 <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
                                 <span>Delete account</span>
@@ -291,6 +316,10 @@
                         </aside>
 
                         <div class="account-main">
+                            <div id="account-loading-overlay" class="account-loading-overlay hidden" aria-hidden="true">
+                                <span class="ga-spinner" role="status" aria-label="Loading account settings"></span>
+                                <span class="account-loading-text">Loading settings…</span>
+                            </div>
                             <div id="account-panel-basics" class="account-panel">
                                 <div id="ga-terminology-key" class="ga-terminology-key" aria-label="GramAddict key terms"></div>
                                 <div id="ga-form-basics" class="ga-form-sections"></div>
@@ -537,7 +566,45 @@
         </main>
     </div>
 
+    <div id="template-manager-overlay" class="modal-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="template-manager-title">
+        <div class="modal-panel modal-panel-lg">
+            <header class="modal-head">
+                <div class="modal-head-titles">
+                    <button type="button" class="modal-back hidden" id="btn-tmpl-back" aria-label="Back to templates">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+                    </button>
+                    <div>
+                        <h2 id="template-manager-title">Templates</h2>
+                        <p class="modal-subtitle" id="template-manager-subtitle">Save an account’s settings once, then apply them to any account. Each account always keeps its own username and phone link.</p>
+                    </div>
+                </div>
+                <button type="button" class="modal-close" id="btn-close-template-manager" aria-label="Close">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                </button>
+            </header>
+
+            <!-- LIBRARY VIEW -->
+            <div class="modal-body" id="tmpl-view-library">
+                <div class="tmpl-toolbar">
+                    <button type="button" class="btn-ghost btn-sm btn-primary-outline" id="btn-tmpl-new">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+                        <span id="btn-tmpl-new-label">Save current account as template</span>
+                    </button>
+                </div>
+                <div class="tmpl-new-form hidden" id="tmpl-new-form">
+                    <input type="text" id="template-save-name" class="ga-input" placeholder="Template name (e.g. Growth preset)" autocomplete="off">
+                    <button type="button" class="btn-ghost btn-sm btn-primary-outline" id="btn-save-template">Save</button>
+                    <button type="button" class="btn-ghost btn-sm" id="btn-tmpl-new-cancel">Cancel</button>
+                </div>
+                <div id="template-manager-list" class="tmpl-list"></div>
+            </div>
+
+            <!-- APPLY VIEW -->
+            <div class="modal-body hidden" id="tmpl-view-apply"></div>
+        </div>
+    </div>
+
     <script>window.__DEBUG_GROUP_COUNTS__ = __DEBUG_BOOTSTRAP__;</script>
-    <script src="/static/dashboard.js?v=43"></script>
+    <script src="/static/dashboard.js?v=60"></script>
 </body>
 </html>

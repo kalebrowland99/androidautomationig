@@ -44,6 +44,27 @@ def _interacted_path(pool_id: str) -> Path:
     return _pool_dir(pool_id) / INTERACTED_FILENAME
 
 
+# Pool-level flag key persisted in pool.yml.
+POSTING_ENABLED_KEY = "posting-enabled"
+
+
+def _dump_pool_meta(
+    pool_id: str, name: str, accounts: list[str], posting_enabled: bool
+) -> None:
+    """Write pool.yml with all pool-level fields preserved."""
+    with _pool_meta_path(pool_id).open("w", encoding="utf-8") as handle:
+        yaml.dump(
+            {
+                "name": name,
+                "accounts": accounts,
+                POSTING_ENABLED_KEY: bool(posting_enabled),
+            },
+            handle,
+            default_flow_style=None,
+            sort_keys=False,
+        )
+
+
 def ensure_pool(pool_id: str) -> None:
     pool_id = normalize_pool_id(pool_id)
     if not pool_id:
@@ -52,9 +73,7 @@ def ensure_pool(pool_id: str) -> None:
     folder.mkdir(parents=True, exist_ok=True)
     meta_path = _pool_meta_path(pool_id)
     if not meta_path.is_file():
-        data = {"name": KNOWN_POOLS[pool_id], "accounts": []}
-        with meta_path.open("w", encoding="utf-8") as handle:
-            yaml.dump(data, handle, default_flow_style=None, sort_keys=False)
+        _dump_pool_meta(pool_id, KNOWN_POOLS[pool_id], [], True)
 
 
 def load_pool_meta(pool_id: str) -> dict[str, Any]:
@@ -66,10 +85,14 @@ def load_pool_meta(pool_id: str) -> dict[str, Any]:
     accounts = data.get("accounts") or []
     if not isinstance(accounts, list):
         accounts = []
+    posting_enabled = data.get(POSTING_ENABLED_KEY)
+    if posting_enabled is None:
+        posting_enabled = True  # default: posting on unless explicitly disabled
     return {
         "id": pool_id,
         "name": str(data.get("name") or KNOWN_POOLS.get(pool_id, pool_id)),
         "accounts": [str(a).strip() for a in accounts if str(a).strip()],
+        "posting_enabled": bool(posting_enabled),
     }
 
 
@@ -88,14 +111,27 @@ def save_pool_accounts(pool_id: str, account_ids: list[str]) -> dict[str, Any]:
         cleaned.append(text)
     meta = load_pool_meta(pool_id)
     meta["accounts"] = cleaned
-    with _pool_meta_path(pool_id).open("w", encoding="utf-8") as handle:
-        yaml.dump(
-            {"name": meta["name"], "accounts": cleaned},
-            handle,
-            default_flow_style=None,
-            sort_keys=False,
-        )
+    _dump_pool_meta(pool_id, meta["name"], cleaned, meta["posting_enabled"])
     return meta
+
+
+def set_pool_posting_enabled(pool_id: str, enabled: bool) -> dict[str, Any]:
+    """Toggle whether the post-reels job runs for every account in this pool."""
+    pool_id = normalize_pool_id(pool_id)
+    if not pool_id:
+        raise ValueError(f"Unknown brand pool: {pool_id}")
+    meta = load_pool_meta(pool_id)
+    _dump_pool_meta(pool_id, meta["name"], meta["accounts"], bool(enabled))
+    meta["posting_enabled"] = bool(enabled)
+    return meta
+
+
+def pool_posting_enabled(pool_id: str | None) -> bool:
+    """True unless a known pool has posting explicitly disabled."""
+    pool_id = normalize_pool_id(pool_id)
+    if not pool_id:
+        return True
+    return bool(load_pool_meta(pool_id)["posting_enabled"])
 
 
 def pool_for_account_id(account_id: str) -> str | None:

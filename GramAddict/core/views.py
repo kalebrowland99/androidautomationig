@@ -3,6 +3,7 @@ import logging
 import re
 import platform
 import time
+from difflib import SequenceMatcher
 from enum import Enum, auto
 from random import choice, randint, uniform
 from time import sleep
@@ -53,6 +54,20 @@ def load_config(config):
 def case_insensitive_re(str_list):
     strings = str_list if isinstance(str_list, str) else "|".join(str_list)
     return f"(?i)({strings})"
+
+
+def _recover_from_popup(device, reason: str) -> bool:
+    """Best-effort: when an element can't be found, a popup may be covering it.
+    Ask the vision model to locate and tap its dismiss button. Returns True only
+    if a popup was detected and tapped (so the caller should retry). Never raises.
+    """
+    try:
+        from GramAddict.core.vision_popup import dismiss_popup_with_vision
+
+        return bool(dismiss_popup_with_vision(device, reason=reason))
+    except Exception as exc:
+        logger.debug(f"Vision popup recovery skipped for {reason}: {exc}")
+        return False
 
 
 class TabBarTabs(Enum):
@@ -494,7 +509,126 @@ class SearchView:
         if obj.exists():
             obj.click()
             return True
+        # Fallbacks below only apply to account searches.
+        if "place" not in job and "hashtag" not in job:
+            # 1) Account rendered as a search "suggestion/entity" row
+            #    (row_search_keyword_title/subtitle) instead of a user row.
+            if self._open_search_entity_row(target):
+                return True
+            # 2) Handle is slightly off (typo / renamed account) but Instagram
+            #    surfaced the intended account as the top result.
+            if self._open_closest_user_row(target):
+                return True
         return False
+
+    # Minimum handle similarity before we'll open a non-exact account match.
+    _CLOSEST_USER_MATCH_RATIO = 0.90
+
+    def _open_closest_user_row(self, target: str) -> bool:
+        """Open the top account result when its handle is a very close match to
+        ``target``.
+
+        Instagram often surfaces the intended account even when the requested
+        handle is slightly off (a typo, or a since-renamed handle). We only act
+        on this when the displayed handle is highly similar to ``target`` so we
+        never open an unrelated account.
+        """
+        username_view = self.device.find(
+            resourceIdMatches=case_insensitive_re(
+                ResourceID.ROW_SEARCH_USER_USERNAME
+            ),
+        )
+        if not username_view.exists(Timeout.SHORT):
+            return False
+        shown = (username_view.get_text(error=False) or "").strip().lstrip("@")
+        want = target.strip().lstrip("@")
+        if not shown or not want:
+            return False
+        if shown.lower() == want.lower():
+            # Exact (case-only) match — safe to open.
+            ratio = 1.0
+        else:
+            ratio = SequenceMatcher(None, want.lower(), shown.lower()).ratio()
+            if ratio < self._CLOSEST_USER_MATCH_RATIO:
+                logger.debug(
+                    f"Top result '{shown}' not similar enough to '{target}' "
+                    f"(similarity {ratio:.2f}); leaving it."
+                )
+                return False
+        logger.info(
+            f"No exact match for '{target}'; opening closest account "
+            f"'{shown}' (similarity {ratio:.2f})."
+        )
+        username_view.click()
+        return True
+
+    def _open_search_entity_row(self, target: str) -> bool:
+        """Open a profile that appears as a search "entity" suggestion row.
+
+        Some accounts show up under a keyword-style row instead of a normal
+        user row. That row's subtitle reads ``"<username> • <N> followers"``
+        and its avatar sits on the *right*. Tapping the row body can trigger a
+        keyword search, but tapping the right-hand avatar opens the profile —
+        so we match the subtitle by username and tap that avatar.
+        """
+        subtitle = self.device.find(
+            resourceIdMatches=case_insensitive_re(
+                ResourceID.ROW_SEARCH_KEYWORD_SUBTITLE
+            ),
+            textMatches=rf"(?i)^{re.escape(target)}(\s|$|[•·・]).*",
+        )
+        if not subtitle.exists(Timeout.SHORT):
+            return False
+        logger.info(
+            f"'{target}' appeared as a search suggestion; opening its profile "
+            "via the avatar on the right."
+        )
+        avatar = self._search_entity_avatar(subtitle)
+        if avatar is None:
+            logger.debug("Could not locate the entity row avatar to tap.")
+            return False
+        avatar.click()
+        return True
+
+    def _search_entity_avatar(self, subtitle):
+        """Return the clickable avatar on the right of the entity row that owns
+        ``subtitle``.
+
+        Preference order:
+          1. the ``row_search_avatar_with_ring`` sharing the subtitle's row
+             (matched by vertical position, on the right half of the screen);
+          2. the lone FrameLayout-classed avatar (standard user rows use a
+             Button), as a build-independent fallback.
+        """
+        try:
+            sb = subtitle.get_bounds()
+        except DeviceFacade.JsonRpcError:
+            sb = None
+        width = self.device.get_info()["displayWidth"]
+        if sb is not None:
+            avatars = self.device.find(
+                resourceIdMatches=case_insensitive_re(
+                    ResourceID.ROW_SEARCH_AVATAR_WITH_RING
+                ),
+            )
+            for av in avatars:
+                try:
+                    b = av.get_bounds()
+                except DeviceFacade.JsonRpcError:
+                    continue
+                cy = (b["top"] + b["bottom"]) / 2
+                cx = (b["left"] + b["right"]) / 2
+                on_this_row = sb["top"] - 140 <= cy <= sb["bottom"] + 140
+                on_right_half = cx > width / 2
+                if on_this_row and on_right_half:
+                    return av
+        fallback = self.device.find(
+            resourceIdMatches=case_insensitive_re(
+                ResourceID.ROW_SEARCH_AVATAR_WITH_RING
+            ),
+            className=ClassName.FRAME_LAYOUT,
+        )
+        return fallback if fallback.exists(Timeout.SHORT) else None
 
 
 class PostsViewList:
@@ -3293,21 +3427,30 @@ class OpenedPostView:
         return liked
 
     def likers_sheet_visible(self) -> bool:
-        """True when the likers bottom sheet is open ('Liked by' header)."""
-        liked_by = case_insensitive_re(r".*liked by.*")
-        if self.device.find(textMatches=liked_by).exists(Timeout.ZERO):
+        """True when the likers bottom sheet is open.
+
+        Instagram's likers header varies by app version and post type:
+        "Liked by …" (facepile row), "Likes", or — when a post also has
+        emoji reactions — "Likes and reactions". Match any of them so we
+        don't wrongly conclude the owner hid likes.
+        """
+        header = case_insensitive_re(r"(liked by.*|likes and reactions|likes)")
+        if self.device.find(textMatches=header).exists(Timeout.ZERO):
             return True
-        return self.device.find(textContains="Liked by").exists(Timeout.ZERO)
+        for needle in ("Liked by", "Likes and reactions"):
+            if self.device.find(textContains=needle).exists(Timeout.ZERO):
+                return True
+        return False
 
     def wait_for_likers_sheet(self, ui_timeout: Timeout = Timeout.MEDIUM) -> bool:
-        """Wait up to 5s for 'Liked by' after tapping the like count."""
+        """Wait up to 5s for the likers header after tapping the like count."""
         deadline = time.monotonic() + DeviceFacade.View.get_ui_timeout(ui_timeout)
         while time.monotonic() < deadline:
             if self.likers_sheet_visible():
-                logger.info("Likers sheet open — 'Liked by' visible.")
+                logger.info("Likers sheet open — header visible.")
                 return True
             sleep(0.25)
-        logger.info("'Liked by' did not appear — likes are hidden.")
+        logger.info("Likers header did not appear — likes are hidden.")
         return False
 
     def _getListViewLikers(self):
@@ -3378,15 +3521,15 @@ class PostsGridView:
             return False
         for pattern in (r".*pin.*", r"^pinned$"):
             pat = case_insensitive_re(pattern)
-            if cell.child(contentDescriptionMatches=pat).exists(Timeout.ZERO):
+            if cell.child(descriptionMatches=pat).exists(Timeout.ZERO):
                 return True
             if cell.child(textMatches=pat).exists(Timeout.ZERO):
                 return True
-        pin_overlay = cell.find(
+        pin_overlay = cell.child(
             resourceIdMatches=case_insensitive_re(r".*(?:pin|pinned).*"),
         )
         if pin_overlay.exists(Timeout.ZERO):
-            rid = str((pin_overlay.get_info() or {}).get("resourceId") or "").lower()
+            rid = str((pin_overlay.ui_info() or {}).get("resourceId") or "").lower()
             if "image_button" not in rid:
                 return True
         return False
@@ -3422,7 +3565,93 @@ class PostsGridView:
         logger.warning("No post found on profile grid after skipping top slots.")
         return None, None, None
 
-    def navigateToPost(self, row, col):
+    def find_post_by_grid_position(self, row: int, col: int):
+        """Find a grid thumbnail by Instagram's a11y content-desc.
+
+        Each thumbnail's content-desc encodes its *visual* position, e.g.
+        ``"Reel by <name> at row 2, column 1"`` (casing of "row"/"column"
+        varies by build). Matching on this is far more reliable than
+        ``child(index=...)`` — uiautomator2 does not expose grid cells in
+        visual order, so index-based lookups land on the wrong cell.
+
+        ``row``/``col`` are 1-based to match Instagram's own numbering.
+        """
+        pattern = case_insensitive_re(rf".*\bat row {row}, column {col}\b.*")
+        return self.device.find(
+            resourceIdMatches=ResourceID.IMAGE_BUTTON,
+            descriptionMatches=pattern,
+        )
+
+    def _ensure_grid_cell_tappable(self, post_view) -> bool:
+        """Scroll the profile grid until ``post_view`` has a tappable height.
+
+        When row 2 peeks just above the tab bar, its bounds can be a few dozen
+        pixels tall — clicking that sliver often misses or hits the wrong cell.
+        """
+        try:
+            bounds = post_view.get_bounds()
+        except Exception:
+            return True
+        height = int(bounds.get("bottom", 0) - bounds.get("top", 0))
+        if height >= 120:
+            return True
+        logger.debug(
+            f"Grid cell only {height}px tall — scrolling to bring it fully on screen."
+        )
+        for _ in range(3):
+            UniversalActions(self.device)._swipe_points(
+                direction=Direction.DOWN, delta_y=randint(280, 380)
+            )
+            random_sleep(0.4, 0.8, modulable=False)
+            if not post_view.exists(Timeout.SHORT):
+                return False
+            try:
+                bounds = post_view.get_bounds()
+                height = int(bounds.get("bottom", 0) - bounds.get("top", 0))
+            except Exception:
+                return True
+            if height >= 120:
+                return True
+        return height >= 60
+
+    def _post_view_opened(self) -> bool:
+        """True when a post/reel media view is on screen (grid tap succeeded)."""
+        try:
+            return OpenedPostView(self.device)._get_focused_post_media() is not None
+        except Exception:
+            return False
+
+    def open_post_by_grid_position(self, row: int, col: int):
+        """Open the grid post at the given 1-based visual ``row``/``col``.
+
+        Uses Instagram's a11y content-desc (``at row N, column M``). Returns
+        ``(OpenedPostView, media_type, obj_count)`` on success, or
+        ``(None, None, None)`` when the thumbnail can't be located / didn't open.
+        """
+        post_view = self.find_post_by_grid_position(row, col)
+        if not post_view.exists(Timeout.MEDIUM):
+            return None, None, None
+        if not self._ensure_grid_cell_tappable(post_view):
+            post_view = self.find_post_by_grid_position(row, col)
+            if not post_view.exists(Timeout.SHORT):
+                return None, None, None
+        post_view.click()
+        random_sleep(0.4, 0.8, modulable=False)
+        if not self._post_view_opened():
+            logger.debug(
+                f"Content-desc tap for row {row} col {col} did not open a post."
+            )
+            return None, None, None
+        media_type, obj_count = PostsViewList(self.device).get_media_type_and_count()
+        return OpenedPostView(self.device), media_type, obj_count
+
+    def open_post_by_hierarchy_index(self, row: int, col: int):
+        """Open the post via hierarchy child indexes (0-based row/col).
+
+        Works on older/different profile layouts where content-desc doesn't
+        include ``at row N, column M``. Can be wrong when the a11y tree order
+        doesn't match the visual grid — see ``navigateToPost``.
+        """
         post_list_view = self._get_post_view()
         post_list_view.wait(Timeout.MEDIUM)
         OFFSET = 1  # row with post starts from index 1
@@ -3433,9 +3662,63 @@ class PostsGridView:
         if not post_view.exists():
             return None, None, None
         post_view.click()
+        random_sleep(0.4, 0.8, modulable=False)
+        if not self._post_view_opened():
+            logger.debug(
+                f"Hierarchy-index tap for row {row + 1} col {col + 1} did not open a post."
+            )
+            return None, None, None
         media_type, obj_count = PostsViewList(self.device).get_media_type_and_count()
-
         return OpenedPostView(self.device), media_type, obj_count
+
+    def navigateToPost(self, row, col):
+        """Open the post at 0-based ``row``/``col`` using both lookup methods.
+
+        Profiles differ across Instagram builds:
+          1) content-desc (``at row N, column M``) — best when present
+          2) hierarchy child(index=…) — still needed when desc is missing
+
+        Try content-desc first; if that cell isn't found or the tap didn't open
+        a post, fall back to the hierarchy-index method.
+        """
+        has_desc = self.find_post_by_grid_position(row + 1, col + 1).exists(
+            Timeout.SHORT
+        )
+        if has_desc:
+            opened, media_type, obj_count = self.open_post_by_grid_position(
+                row + 1, col + 1
+            )
+            if opened is not None:
+                logger.debug(
+                    f"Opened grid post via content-desc (row {row + 1}, col {col + 1})."
+                )
+                return opened, media_type, obj_count
+            # Content-desc existed but tap failed — back to the grid if needed,
+            # then try hierarchy index.
+            if not self._get_post_view().exists(Timeout.ZERO):
+                self.device.back()
+                random_sleep(0.4, 0.8, modulable=False)
+
+        opened, media_type, obj_count = self.open_post_by_hierarchy_index(row, col)
+        if opened is not None:
+            logger.debug(
+                f"Opened grid post via hierarchy index (row {row + 1}, col {col + 1})."
+            )
+            return opened, media_type, obj_count
+
+        # Last try: content-desc if we skipped it (wasn't visible at first).
+        if not has_desc:
+            opened, media_type, obj_count = self.open_post_by_grid_position(
+                row + 1, col + 1
+            )
+            if opened is not None:
+                logger.debug(
+                    f"Opened grid post via content-desc (retry) "
+                    f"(row {row + 1}, col {col + 1})."
+                )
+                return opened, media_type, obj_count
+
+        return None, None, None
 
 
 class ProfileView(ActionBarView):
@@ -3451,7 +3734,7 @@ class ProfileView(ActionBarView):
 
         return OptionsView(self.device)
 
-    def _getActionBarTitleBtn(self, watching_stories=False):
+    def _getActionBarTitleBtn(self, watching_stories=False, ui_timeout=None):
         bar = case_insensitive_re(
             [
                 ResourceID.TITLE_VIEW,
@@ -3465,7 +3748,10 @@ class ProfileView(ActionBarView):
         action_bar = self.device.find(
             resourceIdMatches=bar,
         )
-        if not watching_stories and action_bar.exists(Timeout.LONG) or watching_stories:
+        timeout = ui_timeout
+        if timeout is None:
+            timeout = Timeout.ZERO if watching_stories else Timeout.LONG
+        if not watching_stories and action_bar.exists(timeout) or watching_stories:
             return action_bar
         logger.error(
             "Unable to find action bar! (The element with the username at top)"
@@ -3481,16 +3767,24 @@ class ProfileView(ActionBarView):
     def _label_from_content_desc(self, desc: Optional[str]) -> Optional[str]:
         if not desc:
             return None
-        parts = desc.strip().split()
+        cleaned = desc.strip()
+        parts = cleaned.split()
         if len(parts) >= 2 and self._is_count_text(parts[0]):
             return " ".join(parts[1:]).casefold()
-        return desc.strip().casefold()
+        # The familiar header glues the count to the label with no space, e.g.
+        # "2posts", "23following", "1.2Kfollowers". Strip a leading count token so
+        # the label ("posts"/"followers"/"following") can still be recovered.
+        glued = re.match(r"^\s*[\d.,]+[kmb]?\s*([a-z].*)$", cleaned, re.IGNORECASE)
+        if glued and glued.group(1):
+            return glued.group(1).strip().casefold()
+        return cleaned.casefold()
 
     def _get_profile_stat_label(
         self,
         value_resource_id: str,
         label_resource_id: str,
         legacy_container_id: str,
+        container_resource_id: Optional[str] = None,
     ) -> Optional[str]:
         label_view = self.device.find(
             resourceIdMatches=case_insensitive_re(label_resource_id)
@@ -3520,6 +3814,18 @@ class ProfileView(ActionBarView):
             if label and not self._is_count_text(label):
                 return label
 
+        # Sturdiest fallback: the familiar stat container exposes count+label in
+        # its content-desc ("2posts", "23following"), which survives even when the
+        # inner value/label text views haven't rendered yet.
+        if container_resource_id:
+            container = self.device.find(
+                resourceIdMatches=case_insensitive_re(container_resource_id)
+            )
+            if container.exists(Timeout.SHORT):
+                label = self._label_from_content_desc(container.get_desc())
+                if label and not self._is_count_text(label):
+                    return label
+
         legacy = self.device.find(resourceIdMatches=legacy_container_id)
         if legacy.exists(Timeout.SHORT):
             return legacy.child(index=1).get_text().casefold()
@@ -3539,16 +3845,19 @@ class ProfileView(ActionBarView):
                 ResourceID.PROFILE_HEADER_FAMILIAR_POST_COUNT_VALUE,
                 ResourceID.PROFILE_HEADER_FAMILIAR_POST_COUNT_LABEL,
                 ResourceID.ROW_PROFILE_HEADER_POST_COUNT_CONTAINER,
+                ResourceID.PROFILE_HEADER_POST_COUNT_FRONT_FAMILIAR,
             )
             followers = self._get_profile_stat_label(
                 ResourceID.PROFILE_HEADER_FAMILIAR_FOLLOWERS_VALUE,
                 ResourceID.PROFILE_HEADER_FAMILIAR_FOLLOWERS_LABEL,
                 ResourceID.ROW_PROFILE_HEADER_FOLLOWERS_CONTAINER_LEGACY,
+                ResourceID.PROFILE_HEADER_FOLLOWERS_STACKED_FAMILIAR,
             )
             following = self._get_profile_stat_label(
                 ResourceID.PROFILE_HEADER_FAMILIAR_FOLLOWING_VALUE,
                 ResourceID.PROFILE_HEADER_FAMILIAR_FOLLOWING_LABEL,
                 ResourceID.ROW_PROFILE_HEADER_FOLLOWING_CONTAINER_LEGACY,
+                ResourceID.PROFILE_HEADER_FOLLOWING_STACKED_FAMILIAR,
             )
             if None in {post, followers, following}:
                 raise ValueError("profile header labels not found")
@@ -3609,8 +3918,10 @@ class ProfileView(ActionBarView):
             )
             return None, FollowStatus.NONE
 
-    def getUsername(self, watching_stories=False):
-        action_bar = self._getActionBarTitleBtn(watching_stories)
+    def getUsername(self, watching_stories=False, ui_timeout=None):
+        action_bar = self._getActionBarTitleBtn(
+            watching_stories, ui_timeout=ui_timeout
+        )
         if action_bar is not None:
             return action_bar.get_text(error=not watching_stories).strip()
         if not watching_stories:
@@ -3757,6 +4068,30 @@ class ProfileView(ActionBarView):
         followers = self.getFollowersCount()
         following = self.getFollowingCount()
 
+        # The profile header is often still rendering at session start (and right
+        # after switching accounts), so the count views read as missing:
+        # posts=0 and followers/following=None. Give it a moment and read once
+        # more before accepting the miss — this prevents the false
+        # "Cannot get posts count text." and the downstream soft-ban false alarm.
+        if username is None or followers is None or following is None:
+            logger.debug(
+                "Profile header looks unloaded (username=%s, followers=%s, "
+                "following=%s); retrying profile read once.",
+                username,
+                followers,
+                following,
+            )
+            random_sleep(2.0, 3.0, modulable=False)
+            if username is None:
+                username = self.getUsername()
+            posts = self.getPostsCount()
+            retry_followers = self.getFollowersCount()
+            retry_following = self.getFollowingCount()
+            if retry_followers is not None:
+                followers = retry_followers
+            if retry_following is not None:
+                following = retry_following
+
         return username, posts, followers, following
 
     def getProfileBiography(self) -> str:
@@ -3812,10 +4147,11 @@ class ProfileView(ActionBarView):
             resourceId=ResourceID.REEL_RING,
         )
 
-    def has_story_to_like(self) -> bool:
-        if self.live_marker().exists(Timeout.SHORT):
+    def has_story_to_like(self, ui_timeout=Timeout.SHORT) -> bool:
+        live_timeout = Timeout.ZERO if ui_timeout == Timeout.ZERO else Timeout.TINY
+        if self.live_marker().exists(live_timeout):
             return False
-        return self.StoryRing().exists(Timeout.SHORT)
+        return self.StoryRing().exists(ui_timeout)
 
     def has_unviewed_story(self) -> bool:
         if not self.has_story_to_like():
@@ -3852,6 +4188,18 @@ class ProfileView(ActionBarView):
                     followers_tab.click()
                 return True
         else:
+            # The button is often just hidden behind a popup/permission sheet.
+            # Ask the vision model to dismiss it, then retry once.
+            if _recover_from_popup(self.device, "navigateToFollowers"):
+                if followers_button.exists(Timeout.LONG):
+                    followers_button.click()
+                    followers_tab = self.device.find(
+                        resourceIdMatches=ResourceID.UNIFIED_FOLLOW_LIST_TAB_LAYOUT
+                    ).child(textContains="Followers")
+                    if followers_tab.exists(Timeout.LONG):
+                        if not followers_tab.get_property("selected"):
+                            followers_tab.click()
+                        return True
             logger.error("Can't find followers tab!")
             return False
 
@@ -3870,6 +4218,18 @@ class ProfileView(ActionBarView):
                     following_tab.click()
                 return True
         else:
+            # The button is often just hidden behind a popup/permission sheet.
+            # Ask the vision model to dismiss it, then retry once.
+            if _recover_from_popup(self.device, "navigateToFollowing"):
+                if following_button.exists(Timeout.LONG):
+                    following_button.click_retry()
+                    following_tab = self.device.find(
+                        resourceIdMatches=ResourceID.UNIFIED_FOLLOW_LIST_TAB_LAYOUT
+                    ).child(textContains="Following")
+                    if following_tab.exists(Timeout.LONG):
+                        if not following_tab.get_property("selected"):
+                            following_tab.click()
+                        return True
             logger.error("Can't find following tab!")
             return False
 

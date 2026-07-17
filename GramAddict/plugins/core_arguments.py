@@ -53,6 +53,18 @@ class CoreArguments(Plugin):
                 "default": "50",
             },
             {
+                "arg": "--total-follows-limit-daily",
+                "nargs": None,
+                "help": (
+                    "hard cap on follows per calendar day across all sessions. "
+                    "0 (default) disables it. When set, the per-session follow "
+                    "limit is trimmed to the remaining daily allowance, and once "
+                    "the daily cap is hit no further sessions run that day."
+                ),
+                "metavar": "50",
+                "default": "0",
+            },
+            {
                 "arg": "--total-unfollows-limit",
                 "nargs": None,
                 "help": "limit on total unfollows per session, 50 by default",
@@ -142,6 +154,13 @@ class CoreArguments(Plugin):
                 "help": "amount of hours that have to pass from the last interaction",
                 "metavar": "50",
                 "default": None,
+            },
+            {
+                "arg": "--comment-cooldown-days",
+                "nargs": None,
+                "help": "minimum days between comments on the same user (likes/stories can still run)",
+                "metavar": "7",
+                "default": "7",
             },
             {
                 "arg": "--repeat",
@@ -361,9 +380,14 @@ class CoreArguments(Plugin):
             {
                 "arg": "--skip-top-profile-posts",
                 "nargs": None,
-                "help": "skip the first N posts on a profile grid, 3 by default. Set 0 to disable.",
+                "help": "(legacy) skip the first N posts on a profile grid. Superseded by --skip-first-row.",
                 "metavar": 3,
-                "default": "3",
+                "default": None,
+            },
+            {
+                "arg": "--skip-first-row",
+                "help": "skip the first row of a profile grid (opens the first post of the second row)",
+                "action": "store_true",
             },
             {
                 "arg": "--uia-version",
@@ -378,6 +402,13 @@ class CoreArguments(Plugin):
                 "help": "specify how many sessions you want to do before stopping",
                 "metavar": 1,
                 "default": -1,
+            },
+            {
+                "arg": "--rate-limit-break",
+                "nargs": None,
+                "help": "minutes to pause when Instagram shows 'Try Again Later' (default 720)",
+                "metavar": 1,
+                "default": "720",
             },
             {
                 "arg": "--disable-block-detection",

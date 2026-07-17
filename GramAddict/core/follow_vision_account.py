@@ -19,6 +19,7 @@ FOLLOW_VISION_FILENAME = "follow_vision.yml"
 FOLLOW_VISION_PROMPTS_FILENAME = "follow_vision_prompts.yml"
 POST_REEL_FILENAME = "post_reel.yml"
 FOUND_VIDEOGRAPHERS_FILENAME = "found_videographers_tn.txt"
+STORY_LIKES_FILENAME = "story_likes.txt"
 VIDEOGRAPHER_PHRASE = "music videographer"
 
 DEFAULT_PROMPT_615 = (
@@ -31,10 +32,16 @@ DEFAULT_PROMPT_615 = (
     "- no — everyone else"
 )
 DEFAULT_PROMPT_YLF = (
-    "You will receive two Instagram profile screenshots: the top of the profile (first image) "
-    "and the same profile after scrolling partway down (second image). "
-    "Is this a person who is likely in a relationship or getting married soon? "
-    "Only respond with exactly one of these two phrases: potential couple or no."
+    "You will receive two Instagram profile screenshots (top of profile, then scrolled down) "
+    "and the profile biography text below. "
+    "Respond with exactly ONE of these phrases:\n"
+    "- potential couple — real couple, engaged person, bride or groom (partner may or may not appear "
+    "in the profile), engagement or wedding content, or someone who looks like they are getting "
+    "married soon (NOT a wedding vendor or business account)\n"
+    "- wedding vendor — wedding photographer, videographer, filmmaker, cinematographer, DP, "
+    "planner, florist, DJ, venue, bridal shop, cake baker, or any business/service selling "
+    "to couples (check bio/posts for photographer, videography, wedding films, booking, packages, etc.)\n"
+    "- no — everyone else"
 )
 DEFAULT_COMMENT_PROMPT = (
     "Write one very short, casual Instagram comment aimed at a musician or artist, "
@@ -102,6 +109,7 @@ def default_follow_vision_yml() -> dict[str, Any]:
         "log-videographers": True,
         "ai-comment-enabled": False,
         "ai-comment-prompt": DEFAULT_COMMENT_PROMPT,
+        "vision-popup-dismiss": True,
     }
 
 
@@ -168,6 +176,13 @@ def response_passes(text: str, batch_name: str) -> bool:
     return False
 
 
+def response_is_artist_pass(text: str, batch_name: str) -> bool:
+    """True when vision passed as a musician/artist (not e.g. a wedding couple)."""
+    if not response_passes(text, batch_name):
+        return False
+    return PASS_PHRASES.get(batch_name, "potential musician") == "potential musician"
+
+
 def response_is_music_videographer(text: str) -> bool:
     normalized = _normalize_response(text)
     if "potential musician" in normalized:
@@ -232,6 +247,43 @@ def log_found_tn_videographer(
     log_found_videographer(account_key, username, bio, raw_response)
 
 
+def append_username_to_story_likes_list(account_key: str, username: str) -> bool:
+    """Add a username to story_likes.txt when follow vision passes an artist."""
+    path = resolve_account_dir(account_key) / STORY_LIKES_FILENAME
+    uname = username.lstrip("@").strip()
+    if not uname:
+        return False
+
+    existing: set[str] = set()
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                existing.add(stripped.lstrip("@").casefold())
+    if uname.casefold() in existing:
+        logger.debug("@%s already in %s", uname, path.name)
+        return False
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{uname}\n")
+    logger.info(
+        "Added @%s to %s (follow vision artist pass)",
+        uname,
+        path.name,
+    )
+    try:
+        from GramAddict.core.story_likes_log import append_story_likes_log
+
+        append_story_likes_log(
+            account_key,
+            f"@{uname}: added to story list (follow vision artist pass).",
+        )
+    except Exception as exc:
+        logger.debug("Could not write story likes log for @%s: %s", uname, exc)
+    return True
+
+
 def analyze_profile_images(
     account_key: str,
     image_bytes_list: list[bytes],
@@ -251,7 +303,7 @@ def analyze_profile_images(
     batch_name = str(settings.get("prompt-batch") or "615FILMS")
     prompt = prompts.get(batch_name) or prompts.get("615FILMS") or DEFAULT_PROMPT_615
     bio_clean = re.sub(r"\s+", " ", (bio_text or "").strip())
-    if bio_clean and batch_name == "615FILMS":
+    if bio_clean and batch_name in ("615FILMS", "YourLoveFilms"):
         prompt = f"{prompt}\n\nProfile biography:\n{bio_clean}"
     api_key = _openai_api_key(account_key)
     if not api_key:
@@ -404,6 +456,8 @@ def profile_passes_follow_vision(device, username: str, account_key: str) -> boo
                 username,
                 raw,
             )
+            if response_is_artist_pass(raw, batch_name):
+                append_username_to_story_likes_list(account_key, username)
             return True
         logger.info(
             "Follow vision rejected @%s (%s) — skipping profile.",

@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
-from GramAddict.core.device_facade import DeviceFacade, Mode, Timeout
+from GramAddict.core.device_facade import DeviceFacade, Direction, Mode, Timeout
 from GramAddict.core.utils import random_sleep
 
 logger = logging.getLogger(__name__)
@@ -17,6 +17,8 @@ APP_ID = "com.instagram.android"
 RID = lambda name: f"{APP_ID}:id/{name}"
 
 CREATE_LEFT_CONTAINER = RID("action_bar_buttons_container_left")
+TAB_BAR = RID("tab_bar")
+HOME_TAB_DESC = "Home"
 GALLERY_THUMB = RID("gallery_grid_item_thumbnail")
 NEXT_TOP = RID("next_button_textview")
 CLIPS_NEXT = RID("clips_right_action_button")
@@ -58,6 +60,21 @@ def adb_shell(serial: str, *args: str, timeout: int = 120) -> subprocess.Complet
     adb = resolve_adb_path()
     cmd = [adb, "-s", serial, "shell", *args]
     return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def adb_shell_safe(serial: str, *args: str, timeout: int = 120) -> Optional[subprocess.CompletedProcess[str]]:
+    """adb_shell that never raises on timeout — returns None if it times out.
+
+    Used for best-effort device cleanup (e.g. clearing the gallery) where a slow
+    or unresponsive device must not abort the whole flow.
+    """
+    try:
+        return adb_shell(serial, *args, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        logger.warning(
+            "adb shell timed out after %ss (continuing): %s", timeout, " ".join(args)
+        )
+        return None
 
 
 def adb_push(serial: str, local_path: Path, remote_path: str, timeout: int = 300) -> bool:
@@ -106,21 +123,22 @@ def clear_device_gallery(serial: str, include_images: bool = True) -> None:
     then remove any leftover physical files from the common media folders.
     """
     # 1) Delete the MediaStore rows the gallery actually reads from.
-    adb_shell(serial, "content", "delete", "--uri", MEDIASTORE_VIDEO_URI, timeout=60)
+    adb_shell_safe(serial, "content", "delete", "--uri", MEDIASTORE_VIDEO_URI, timeout=60)
     if include_images:
-        adb_shell(serial, "content", "delete", "--uri", MEDIASTORE_IMAGE_URI, timeout=60)
+        adb_shell_safe(serial, "content", "delete", "--uri", MEDIASTORE_IMAGE_URI, timeout=60)
 
     # 2) Remove any leftover physical files (incl. hidden ones) so a rescan
     #    can't re-add stale media. Run via `sh -c` so the device shell expands
-    #    the glob; passing "dir/*" as a bare arg does not glob reliably.
+    #    the glob; passing "dir/*" as a bare arg does not glob reliably. A slow
+    #    device must not abort the clear, so these are best-effort (never raise).
     for directory in GALLERY_DIRS:
-        adb_shell(
+        adb_shell_safe(
             serial,
             "sh",
             "-c",
             f"find {directory} -maxdepth 1 -type f -delete 2>/dev/null; "
             f"rm -f {directory}/*.* 2>/dev/null; true",
-            timeout=60,
+            timeout=90,
         )
 
     # 3) Rescan so the MediaStore reflects the now-empty folders.
@@ -174,8 +192,32 @@ def push_video_to_gallery(serial: str, local_path: Path) -> Optional[str]:
     return remote
 
 
+def tap_home_tab(device: DeviceFacade) -> bool:
+    """Land on the Home feed via the bottom-left Home tab.
+
+    The top-left create (+) button only exists on the Home feed, so we always
+    tap Home first — otherwise the create selector fails wherever Instagram
+    happened to be. Falls back to a bottom-left tap if the tab can't be found.
+    """
+    d = device.deviceV2
+    tab_bar = d(resourceId=TAB_BAR)
+    home = tab_bar.child(description=HOME_TAB_DESC) if tab_bar.exists else d(description=HOME_TAB_DESC)
+    if home.wait(timeout=5):
+        home.click()
+        random_sleep(0.6, 1.2, modulable=False)
+        return True
+    info = device.get_info()
+    x = int(info["displayWidth"] * 0.1)
+    y = int(info["displayHeight"] * 0.965)
+    logger.warning("Home tab selector failed — fallback tap at (%s, %s)", x, y)
+    d.click(x, y)
+    random_sleep(0.6, 1.2, modulable=False)
+    return True
+
+
 def tap_create_button(device: DeviceFacade) -> bool:
-    """Tap Instagram top-left + create button."""
+    """Tap Instagram top-left + create button (always lands on Home first)."""
+    tap_home_tab(device)
     d = device.deviceV2
     left = d(resourceId=CREATE_LEFT_CONTAINER)
     if left.wait(timeout=5):
@@ -295,6 +337,118 @@ def wait_for_post_success(device: DeviceFacade, timeout: float = 45.0) -> bool:
     return False
 
 
+# Text on the Home-feed rows Instagram shows while a post is still uploading,
+# e.g. "Keep Instagram open to finish posting…". Matched via substrings so it
+# survives minor wording/ellipsis differences across app versions.
+_UPLOAD_PENDING_SUBSTRINGS = ("finish posting", "Keep Instagram open")
+
+
+def _upload_pending(device: DeviceFacade) -> bool:
+    """True while at least one 'Keep Instagram open to finish posting…' row shows."""
+    d = device.deviceV2
+    for needle in _UPLOAD_PENDING_SUBSTRINGS:
+        if d(textContains=needle).exists(timeout=1):
+            return True
+    return False
+
+
+def _uploads_cleared(device: DeviceFacade) -> bool:
+    """Confirm no pending-upload text remains, with a second check to avoid a
+    false positive during a transient feed-render gap."""
+    if _upload_pending(device):
+        return False
+    random_sleep(1.5, 2.5, modulable=False)
+    return not _upload_pending(device)
+
+
+def _open_reels_tab(device: DeviceFacade) -> bool:
+    """Open the Reels/Clips tab (the one right of Home). Best-effort."""
+    tap_home_tab(device)
+    random_sleep(0.5, 1.0, modulable=False)
+    try:
+        from GramAddict.core.navigation import _tap_tab_right_of_home
+
+        return bool(_tap_tab_right_of_home(device))
+    except Exception as exc:
+        logger.debug("Could not open Reels tab: %s", exc)
+        return False
+
+
+def _scroll_reels_for(device: DeviceFacade, duration: float) -> None:
+    """Swipe up through Reels for ~`duration` seconds to keep the app active
+    (Instagram pauses/slows background uploads when the app looks idle)."""
+    deadline = time.time() + max(0.0, duration)
+    while time.time() < deadline:
+        try:
+            device.swipe(Direction.UP, scale=0.9)
+        except Exception as exc:
+            logger.debug("Reels scroll swipe failed: %s", exc)
+        # Watch each reel a few seconds before flicking to the next.
+        random_sleep(3.0, 6.0, modulable=False)
+
+
+def wait_for_uploads_to_finish(
+    device: DeviceFacade,
+    *,
+    timeout: float = 1500.0,
+    appear_timeout: float = 15.0,
+    check_interval: float = 30.0,
+) -> bool:
+    """Wait for all pending uploads to finish, scrolling Reels while we wait.
+
+    After posting, Instagram keeps uploading in the background and shows
+    "Keep Instagram open to finish posting…" at the top of the Home feed;
+    closing the app too early can drop the post. It also slows uploads when the
+    app looks idle, so instead of staring at Home we scroll the Reels tab to
+    keep it active, then pop back to Home every `check_interval` seconds to see
+    if the "…finish posting…" text has cleared (the row may linger, but that
+    text going away is the reliable "done" signal). Uploads can take 20+ min, so
+    `timeout` defaults to 25 minutes. Returns True once cleared, else False.
+    """
+    tap_home_tab(device)
+    random_sleep(1.5, 2.5, modulable=False)
+
+    # Phase 1 — confirm at least one pending-upload row shows up. If none ever
+    # appears, the upload was already instant/complete, so we're done.
+    appear_deadline = time.time() + appear_timeout
+    saw_pending = False
+    while time.time() < appear_deadline:
+        if _upload_pending(device):
+            saw_pending = True
+            break
+        random_sleep(1.0, 1.5, modulable=False)
+    if not saw_pending:
+        logger.info("No pending-upload rows on Home — uploads already finished.")
+        return True
+
+    # Phase 2 — scroll Reels to keep the app active, checking Home every
+    # `check_interval` seconds until the pending-upload text clears.
+    logger.info(
+        "Uploads in progress — scrolling Reels and checking Home every %ss…",
+        int(check_interval),
+    )
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _open_reels_tab(device):
+            _scroll_reels_for(device, min(check_interval, deadline - time.time()))
+        else:
+            # Couldn't reach Reels — just wait out the interval before rechecking.
+            random_sleep(check_interval, check_interval + 2.0, modulable=False)
+
+        tap_home_tab(device)
+        random_sleep(1.5, 2.5, modulable=False)
+        if _uploads_cleared(device):
+            logger.info("All uploads finished — 'finish posting' text cleared.")
+            return True
+        logger.info("Still uploading — back to Reels to keep the app active…")
+
+    logger.warning(
+        "Upload wait timed out after %ss — a 'finish posting' row is still visible.",
+        int(timeout),
+    )
+    return False
+
+
 def prepare_gallery_with_media(
     serial: str,
     media_dir: Path,
@@ -317,6 +471,23 @@ def prepare_gallery_with_media(
     if not remote:
         return None
     return local
+
+
+def _step_or_recover(device: DeviceFacade, step, *, name: str) -> bool:
+    """Run a reel step; on failure, try to dismiss a blocking popup via the
+    vision model and retry the step once. A modal/permission sheet covering the
+    UI is a common reason a tap/selector "can't find" its target."""
+    if step():
+        return True
+    try:
+        from GramAddict.core.vision_popup import dismiss_popup_with_vision
+
+        if dismiss_popup_with_vision(device, reason=f"post_reel:{name}"):
+            random_sleep(0.8, 1.4, modulable=False)
+            return step()
+    except Exception as exc:
+        logger.debug("Vision popup recovery failed for %s: %s", name, exc)
+    return False
 
 
 def run_single_reel_post(
@@ -344,13 +515,15 @@ def run_single_reel_post(
 
     steps.append(f"pushed:{local.name}")
 
-    if not tap_create_button(device):
+    if not _step_or_recover(device, lambda: tap_create_button(device), name="tap_create"):
         return {"success": False, "message": "Could not tap create (+) button", "steps": steps}
     steps.append("tap_create")
 
     random_sleep(1.0, 2.0, modulable=False)
 
-    if not select_recent_media(device, gallery_select_number):
+    if not _step_or_recover(
+        device, lambda: select_recent_media(device, gallery_select_number), name="select_media"
+    ):
         return {
             "success": False,
             "message": f"Could not select gallery item #{gallery_select_number}",
@@ -358,22 +531,24 @@ def run_single_reel_post(
         }
     steps.append(f"select_media:{gallery_select_number}")
 
-    if not tap_next_top(device):
+    if not _step_or_recover(device, lambda: tap_next_top(device), name="next_top"):
         return {"success": False, "message": "Could not tap top-right Next", "steps": steps}
     steps.append("next_top")
 
     dismiss_popups_center(device, taps=3)
     steps.append("dismiss_popups")
 
-    if not tap_next_clips(device):
+    if not _step_or_recover(device, lambda: tap_next_clips(device), name="next_clips"):
         return {"success": False, "message": "Could not tap clips Next", "steps": steps}
     steps.append("next_clips")
 
-    if not enter_caption(device, caption, paste=paste_caption):
+    if not _step_or_recover(
+        device, lambda: enter_caption(device, caption, paste=paste_caption), name="caption"
+    ):
         return {"success": False, "message": "Could not enter caption", "steps": steps}
     steps.append("caption")
 
-    if not tap_share(device):
+    if not _step_or_recover(device, lambda: tap_share(device), name="share"):
         return {"success": False, "message": "Could not tap Share", "steps": steps}
     steps.append("share")
 

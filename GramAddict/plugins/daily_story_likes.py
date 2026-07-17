@@ -17,14 +17,15 @@ class DailyStoryLikes(Plugin):
         super().__init__()
         self.description = (
             "Visit accounts from a list, like all segments in any new story, "
-            "then move to the next account. Use can-reinteract-after: 24 for once per day."
+            "then move to the next account. Ignores interaction history; "
+            "artists who pass follow vision are added to the list automatically."
         )
         self.arguments = [
             {
                 "arg": "--daily-story-likes",
                 "nargs": "+",
                 "help": "filenames of daily story-like username lists [*.txt]",
-                "metavar": ("story_likes.txt",),
+                "metavar": ("story_likes1.txt", "story_likes2.txt"),
                 "default": None,
                 "operation": True,
             },

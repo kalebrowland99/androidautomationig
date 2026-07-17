@@ -37,8 +37,9 @@ def telegram_bot_send_text(bot_api_token, bot_chat_ID, text, parse_mode="markdow
         if parse_mode:
             params["parse_mode"] = parse_mode
         url = f"https://api.telegram.org/bot{bot_api_token}/{method}"
-        return requests.get(url, params=params).json()
+        return requests.get(url, params=params, timeout=20).json()
     except Exception as e:
+        # Usually a transient network/VPN hiccup reaching api.telegram.org.
         logger.error(f"Error sending Telegram message: {e}")
         return None
 

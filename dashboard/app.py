@@ -9,12 +9,14 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from dashboard import account_templates, brand_pools, debug_log, device_service, follow_vision_config, gramaddict_config, post_reel_config, telegram_commands, weditor_service
 from dashboard.session_estimate import estimate_session
+from dashboard.session_explain import explain_session
 from GramAddict.core.account_safety import is_autopost_locked
 from GramAddict.core.post_reel_account import load_post_reel_state
 from dashboard.debug_tests import (
@@ -42,6 +44,10 @@ async def _lifespan(_app: FastAPI):
     except Exception as exc:
         print(f"Warning: Weditor did not start: {exc}")
     await asyncio.to_thread(telegram_commands.telegram_command_service.start)
+    try:
+        await _reconcile_device_links(notify=False)
+    except Exception as exc:
+        print(f"Warning: device link reconcile failed: {exc}")
     yield
     await asyncio.to_thread(telegram_commands.telegram_command_service.stop)
     debug_log.set_broadcast(None)
@@ -73,6 +79,23 @@ async def _device_call(fn, *args, **kwargs):
         return await asyncio.to_thread(fn, *args, **kwargs)
     except device_service.DeviceBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+def _reconcile_links_blocking() -> bool:
+    """Full device scan (with hardware ids) + heal phone↔account links. Off-thread."""
+    try:
+        devices = device_service.get_devices_with_hardware_ids()
+    except Exception:
+        return False
+    return gramaddict_config.reconcile_device_links(devices)
+
+
+async def _reconcile_device_links(*, notify: bool = True) -> bool:
+    """Heal account links when ADB serials change (wireless IP change, replug)."""
+    changed = await asyncio.to_thread(_reconcile_links_blocking)
+    if changed and notify:
+        await _broadcast({"type": "accounts_changed"})
+    return changed
 
 
 def _run_debug_test_locked(serial: str, test_id: str, **kwargs: Any) -> dict[str, Any]:
@@ -207,11 +230,21 @@ class AccountFollowVisionPromptsBody(BaseModel):
 class SessionEstimateBody(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
     post_reel: dict[str, Any] = Field(default_factory=dict)
+    follow_vision: dict[str, Any] = Field(default_factory=dict)
 
 
 class BotRunBody(BaseModel):
     device_serial: Optional[str] = None
     vpn_app_name: Optional[str] = None
+
+
+class AccountDisableBody(BaseModel):
+    disabled: bool = True
+    reason: str = ""
+
+
+class AccountNoteBody(BaseModel):
+    note: str = ""
 
 
 class DeviceAccountBody(BaseModel):
@@ -228,8 +261,25 @@ class ApplySettingsBody(BaseModel):
     include_lists: bool = False
 
 
+class SettingTemplateRenameBody(BaseModel):
+    name: str
+
+
+class ApplyTemplateBulkBody(BaseModel):
+    account_ids: list[str] = Field(default_factory=list)
+    include_lists: bool = False
+
+
 class BrandPoolAccountsBody(BaseModel):
     accounts: list[str] = Field(default_factory=list)
+
+
+class DistributeMediaBody(BaseModel):
+    filename: str
+
+
+class BrandPoolPostingBody(BaseModel):
+    enabled: bool
 
 
 @app.get("/api/brand-pools")
@@ -244,6 +294,68 @@ async def api_list_brand_pools() -> dict[str, Any]:
 async def api_set_brand_pool_accounts(pool_id: str, body: BrandPoolAccountsBody) -> dict[str, Any]:
     try:
         return brand_pools.set_pool_accounts(pool_id, body.accounts)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/brand-pools/{pool_id}/posting")
+async def api_set_brand_pool_posting(
+    pool_id: str, body: BrandPoolPostingBody
+) -> dict[str, Any]:
+    try:
+        return await asyncio.to_thread(
+            brand_pools.set_pool_posting, pool_id, body.enabled
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/brand-pools/{pool_id}/media")
+async def api_list_brand_pool_media(pool_id: str) -> dict[str, Any]:
+    try:
+        return await asyncio.to_thread(brand_pools.list_pool_media, pool_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/brand-pools/{pool_id}/media")
+async def api_upload_brand_pool_media(
+    pool_id: str,
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    try:
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="Filename is required")
+        suffix = Path(file.filename).suffix.lower()
+        if suffix not in {".mp4", ".mov", ".m4v", ".webm", ".mkv"}:
+            raise HTTPException(
+                status_code=400,
+                detail="Only video files are allowed (.mp4, .mov, .m4v, .webm, .mkv)",
+            )
+        data = await file.read()
+        if not data:
+            raise HTTPException(status_code=400, detail="Empty file")
+        if len(data) > 500 * 1024 * 1024:
+            raise HTTPException(status_code=400, detail="File too large (max 500 MB)")
+        result = await asyncio.to_thread(
+            brand_pools.upload_media_to_pool, pool_id, file.filename, data
+        )
+        result["files"] = (await asyncio.to_thread(brand_pools.list_pool_media, pool_id))["files"]
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/brand-pools/{pool_id}/media/delete")
+async def api_delete_brand_pool_media(
+    pool_id: str, body: DistributeMediaBody
+) -> dict[str, Any]:
+    try:
+        result = await asyncio.to_thread(
+            brand_pools.delete_media_from_pool, pool_id, body.filename
+        )
+        result["files"] = (await asyncio.to_thread(brand_pools.list_pool_media, pool_id))["files"]
+        return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -267,12 +379,45 @@ async def api_account_save_template(account_id: str, body: SettingTemplateSaveBo
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.patch("/api/gramaddict/templates/{template_id}")
+async def api_rename_setting_template(template_id: str, body: SettingTemplateRenameBody) -> dict[str, Any]:
+    try:
+        return account_templates.rename_setting_template(template_id, body.name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.delete("/api/gramaddict/templates/{template_id}")
 async def api_delete_setting_template(template_id: str) -> dict[str, Any]:
     try:
         return account_templates.delete_setting_template(template_id)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/gramaddict/templates/{template_id}/apply")
+async def api_apply_template_bulk(template_id: str, body: ApplyTemplateBulkBody) -> dict[str, Any]:
+    try:
+        return account_templates.apply_template_to_accounts(
+            template_id,
+            body.account_ids,
+            include_lists=body.include_lists,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/gramaddict/accounts/{account_id}/template-status")
+async def api_account_template_status(account_id: str) -> dict[str, Any]:
+    try:
+        gramaddict_config.get_account(account_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return account_templates.get_account_template_status(account_id)
 
 
 @app.post("/api/gramaddict/accounts/{account_id}/apply-settings")
@@ -604,7 +749,23 @@ async def api_gramaddict_create_account(body: AccountCreateBody) -> dict[str, An
 @app.post("/api/gramaddict/estimate")
 async def api_gramaddict_estimate(body: SessionEstimateBody) -> dict[str, Any]:
     cfg = gramaddict_config.config_from_ui(body.config or {})
-    return estimate_session(cfg, post_reel=body.post_reel or {})
+    return estimate_session(
+        cfg, post_reel=body.post_reel or {}, follow_vision=body.follow_vision or {}
+    )
+
+
+@app.post("/api/gramaddict/accounts/{account_id}/explain-session")
+async def api_gramaddict_explain_session(
+    account_id: str, body: SessionEstimateBody
+) -> dict[str, Any]:
+    cfg = gramaddict_config.config_from_ui(body.config or {})
+    return await run_in_threadpool(
+        explain_session,
+        cfg,
+        post_reel=body.post_reel or {},
+        follow_vision=body.follow_vision or {},
+        account_id=account_id,
+    )
 
 
 @app.get("/api/gramaddict/accounts/{account_id}")
@@ -615,6 +776,18 @@ async def api_gramaddict_get_account(account_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+def _sync_template_after_edit(account_id: str) -> None:
+    """Best-effort: push an account's saved settings back into its template.
+
+    Runs after any account-tab save so a connected template stays in sync with
+    the edits. Never fails the underlying save if the sync hits a problem.
+    """
+    try:
+        account_templates.sync_template_from_account(account_id)
+    except Exception as exc:  # noqa: BLE001 - sync is best-effort
+        print(f"Warning: template sync failed for {account_id}: {exc}")
+
+
 @app.put("/api/gramaddict/accounts/{account_id}")
 async def api_gramaddict_save_account(
     account_id: str,
@@ -622,8 +795,11 @@ async def api_gramaddict_save_account(
 ) -> dict[str, Any]:
     try:
         if body.raw_yaml is not None:
-            return gramaddict_config.save_account_raw_yaml(account_id, body.raw_yaml)
-        return gramaddict_config.save_account_config(account_id, body.config)
+            result = gramaddict_config.save_account_raw_yaml(account_id, body.raw_yaml)
+        else:
+            result = gramaddict_config.save_account_config(account_id, body.config)
+        _sync_template_after_edit(account_id)
+        return result
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -638,9 +814,34 @@ async def api_gramaddict_delete_account(account_id: str) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/gramaddict/accounts-status")
+async def api_gramaddict_accounts_status() -> list[dict[str, Any]]:
+    return await asyncio.to_thread(gramaddict_config.accounts_status)
+
+
 @app.get("/api/gramaddict/accounts/{account_id}/status")
 async def api_gramaddict_bot_status(account_id: str) -> dict[str, Any]:
     return gramaddict_config.bot_status(account_id)
+
+
+@app.get("/api/gramaddict/accounts/{account_id}/log")
+async def api_gramaddict_bot_log(
+    account_id: str, lines: int = 500
+) -> dict[str, Any]:
+    lines = max(1, min(lines, 5000))
+    return await asyncio.to_thread(
+        gramaddict_config.read_bot_log, account_id, max_lines=lines
+    )
+
+
+@app.get("/api/gramaddict/accounts/{account_id}/story-likes-log")
+async def api_gramaddict_story_likes_log(
+    account_id: str, lines: int = 400
+) -> dict[str, Any]:
+    lines = max(1, min(lines, 2000))
+    return await asyncio.to_thread(
+        gramaddict_config.read_story_likes_log, account_id, max_lines=lines
+    )
 
 
 @app.post("/api/gramaddict/accounts/{account_id}/run")
@@ -672,8 +873,33 @@ async def api_gramaddict_run_bot(
 
 
 @app.post("/api/gramaddict/accounts/{account_id}/stop")
-async def api_gramaddict_stop_bot(account_id: str) -> dict[str, Any]:
-    return gramaddict_config.stop_bot(account_id)
+async def api_gramaddict_stop_bot(
+    account_id: str, force: bool = False
+) -> dict[str, Any]:
+    # Run off the event loop so concurrent stop requests (e.g. "Stop selected"
+    # firing several at once) actually kill in parallel instead of serializing.
+    return await asyncio.to_thread(gramaddict_config.stop_bot, account_id, force=force)
+
+
+@app.post("/api/gramaddict/accounts/{account_id}/disable")
+async def api_gramaddict_disable_account(
+    account_id: str, body: AccountDisableBody
+) -> dict[str, Any]:
+    return await asyncio.to_thread(
+        gramaddict_config.set_account_disabled,
+        account_id,
+        body.disabled,
+        body.reason,
+    )
+
+
+@app.post("/api/gramaddict/accounts/{account_id}/note")
+async def api_gramaddict_set_account_note(
+    account_id: str, body: AccountNoteBody
+) -> dict[str, Any]:
+    return await asyncio.to_thread(
+        gramaddict_config.set_account_note, account_id, body.note
+    )
 
 
 @app.get("/api/gramaddict/accounts/{account_id}/filters")
@@ -690,7 +916,9 @@ async def api_gramaddict_save_filters(
     body: AccountFiltersBody,
 ) -> dict[str, Any]:
     try:
-        return gramaddict_config.save_account_filters(account_id, body.filters)
+        result = gramaddict_config.save_account_filters(account_id, body.filters)
+        _sync_template_after_edit(account_id)
+        return result
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -709,7 +937,9 @@ async def api_gramaddict_save_telegram(
     body: AccountTelegramBody,
 ) -> dict[str, Any]:
     try:
-        return gramaddict_config.save_account_telegram(account_id, body.telegram)
+        result = gramaddict_config.save_account_telegram(account_id, body.telegram)
+        _sync_template_after_edit(account_id)
+        return result
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -736,7 +966,9 @@ async def api_gramaddict_save_follow_vision(
     body: AccountFollowVisionBody,
 ) -> dict[str, Any]:
     try:
-        return follow_vision_config.save_account_follow_vision(account_id, body.follow_vision)
+        result = follow_vision_config.save_account_follow_vision(account_id, body.follow_vision)
+        _sync_template_after_edit(account_id)
+        return result
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -747,7 +979,9 @@ async def api_gramaddict_save_follow_vision_prompts(
     body: AccountFollowVisionPromptsBody,
 ) -> dict[str, str]:
     try:
-        return follow_vision_config.save_account_follow_vision_prompts(account_id, body.prompts)
+        result = follow_vision_config.save_account_follow_vision_prompts(account_id, body.prompts)
+        _sync_template_after_edit(account_id)
+        return result
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -776,7 +1010,9 @@ async def api_gramaddict_save_post_reel(
     body: AccountPostReelBody,
 ) -> dict[str, Any]:
     try:
-        return post_reel_config.save_account_post_reel(account_id, body.post_reel)
+        result = post_reel_config.save_account_post_reel(account_id, body.post_reel)
+        _sync_template_after_edit(account_id)
+        return result
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -787,7 +1023,9 @@ async def api_gramaddict_save_post_reel_prompts(
     body: AccountPostReelPromptsBody,
 ) -> dict[str, str]:
     try:
-        return post_reel_config.save_account_post_reel_prompts(account_id, body.prompts)
+        result = post_reel_config.save_account_post_reel_prompts(account_id, body.prompts)
+        _sync_template_after_edit(account_id)
+        return result
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
@@ -857,6 +1095,40 @@ async def api_gramaddict_delete_post_media(account_id: str, filename: str) -> di
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/gramaddict/accounts/{account_id}/post-reel/media/distribute")
+async def api_gramaddict_distribute_post_media(
+    account_id: str,
+    body: DistributeMediaBody,
+) -> dict[str, Any]:
+    try:
+        gramaddict_config.get_account(account_id)
+        return account_templates.distribute_media_to_connected_accounts(
+            account_id, body.filename
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/gramaddict/accounts/{account_id}/post-reel/media/delete-connected")
+async def api_gramaddict_delete_post_media_connected(
+    account_id: str,
+    body: DistributeMediaBody,
+) -> dict[str, Any]:
+    try:
+        gramaddict_config.get_account(account_id)
+        result = account_templates.delete_media_from_connected_accounts(
+            account_id, body.filename
+        )
+        result["files"] = post_reel_config.list_post_media_files(account_id)
+        return result
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/gramaddict/accounts/{account_id}/files")
 async def api_gramaddict_list_files(account_id: str) -> list[dict[str, str]]:
     try:
@@ -882,7 +1154,9 @@ async def api_gramaddict_save_file(
     body: AccountFileBody,
 ) -> dict[str, str]:
     try:
-        return gramaddict_config.save_account_file(account_id, filename, body.content)
+        result = gramaddict_config.save_account_file(account_id, filename, body.content)
+        _sync_template_after_edit(account_id)
+        return result
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
@@ -932,9 +1206,24 @@ async def websocket_endpoint(ws: WebSocket) -> None:
             except asyncio.TimeoutError:
                 try:
                     devices = await _device_call(device_service.get_adb_devices, fast=True)
+                    serials_changed = {d["serial"] for d in devices} != {
+                        d["serial"] for d in _last_devices
+                    }
                     if devices != _last_devices:
                         _last_devices = devices
                         await _broadcast({"type": "devices", "devices": devices})
+                    # A changed serial set can mean a phone reconnected on a new
+                    # wireless IP — heal account links so @names stick to the phone.
+                    if serials_changed:
+                        healed = await _reconcile_device_links()
+                        if healed:
+                            refreshed = await _device_call(
+                                device_service.get_adb_devices, fast=True
+                            )
+                            _last_devices = refreshed
+                            await _broadcast(
+                                {"type": "devices", "devices": refreshed}
+                            )
                 except Exception:
                     pass
     except WebSocketDisconnect:

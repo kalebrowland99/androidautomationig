@@ -30,7 +30,10 @@ FILTER_FIELDS: dict[str, list[dict[str, Any]]] = {
         {"key": "mutual_friends", "label": "Minimum mutual followers", "type": "text", "default": "-1"},
     ],
     "biography": [
-        {"key": "blacklist_words", "label": "Skip if bio contains these words", "type": "lines"},
+        {"key": "blacklist_words", "label": "Skip if bio, name, or @handle has these words", "type": "lines"},
+        {"key": "blacklist_words_bio", "label": "Skip if bio has these words", "type": "lines"},
+        {"key": "blacklist_words_name", "label": "Skip if display name has these words", "type": "lines"},
+        {"key": "blacklist_words_handle", "label": "Skip if @handle has these words", "type": "lines"},
         {"key": "mandatory_words", "label": "Only if bio contains these words", "type": "lines"},
         {"key": "specific_alphabet", "label": "Allowed alphabets", "type": "lines"},
         {"key": "biography_language", "label": "Allowed bio languages", "type": "lines"},
@@ -77,6 +80,11 @@ TELEGRAM_FIELDS: list[dict[str, Any]] = [
     {
         "key": "telegram-status-commands",
         "label": "Allow Telegram status commands",
+        "type": "bool",
+    },
+    {
+        "key": "telegram-ai-assistant",
+        "label": "AI assistant — answer free-form questions in Telegram",
         "type": "bool",
     },
     {

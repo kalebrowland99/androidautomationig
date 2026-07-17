@@ -1,2 +1,0 @@
-# One Instagram username per line (no @).
-# Used by the Daily story likes job on the Jobs tab.

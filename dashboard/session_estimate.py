@@ -25,6 +25,18 @@ SECONDS_PER_REMOVE = 55
 SECONDS_PER_POST_URL = 40
 SECONDS_PER_REEL_POST = 240
 
+# AI follow-vision overhead PER profile visited (2 screenshots + 4 profile
+# swipes + one OpenAI Vision request). The high end assumes a slow API round-trip.
+VISION_SECONDS_LO = 9.0
+VISION_SECONDS_HI = 20.0
+# Share of visited profiles that pass the vision filter (the rest are skipped, so
+# more profiles must be visited to reach the successful-interactions cap).
+VISION_PASS_RATIO = 0.4
+# Posting one comment (open composer, type, submit).
+SECONDS_PER_COMMENT = 14.0
+# Extra time to generate one comment via OpenAI (only when ai-comment-enabled).
+SECONDS_PER_AI_COMMENT_GEN = 5.0
+
 HASHTAG_JOBS = {
     "hashtag-likers-top",
     "hashtag-likers-recent",
@@ -167,14 +179,34 @@ def _format_range(lo_min: float, hi_min: float) -> str:
     return f"{_format_minutes(lo_min)} – {_format_minutes(hi_min)}"
 
 
-def estimate_session(config: dict[str, Any], *, post_reel: dict[str, Any] | None = None) -> dict[str, Any]:
+def estimate_session(
+    config: dict[str, Any],
+    *,
+    post_reel: dict[str, Any] | None = None,
+    follow_vision: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Return session timing estimate and config warnings for dashboard display."""
     post_reel = post_reel or {}
+    follow_vision = follow_vision or {}
     warnings: list[dict[str, str]] = []
     job_breakdown: list[dict[str, Any]] = []
 
     speed_mid = parse_range(config.get("speed-multiplier"), 1.0)[2]
     prof_lo, prof_hi = _profile_visit_seconds(config)
+
+    # AI vision runs on every profile the interaction jobs visit: it adds capture +
+    # OpenAI-request time per profile and skips a share of them, so the account has
+    # to visit more profiles to reach the successful-interactions cap.
+    vision_enabled = bool(follow_vision.get("enabled"))
+    # AI comments are independent of vision screening: GramAddict uses an AI-generated
+    # comment whenever `ai-comment-enabled` is set, even if the vision filter is off.
+    ai_comment_enabled = bool(follow_vision.get("ai-comment-enabled"))
+    vision_pass_ratio = VISION_PASS_RATIO if vision_enabled else 1.0
+    if vision_enabled:
+        prof_lo += VISION_SECONDS_LO
+        prof_hi += VISION_SECONDS_HI
+    # NOTE: comment time (incl. AI generation) is added per-comment below, capped by
+    # total-comments-limit — not spread across every profile.
     ic_lo, ic_hi, ic_mid = parse_range(config.get("interactions-count"), 35)
     trunc_lo, trunc_hi, trunc_mid = parse_range(config.get("truncate-sources"), 3)
     interact_pct_lo, interact_pct_hi, interact_pct_mid = parse_range(
@@ -183,21 +215,32 @@ def estimate_session(config: dict[str, Any], *, post_reel: dict[str, Any] | None
 
     expected_profiles_lo = 0.0
     expected_profiles_hi = 0.0
+    # Profile-visit jobs that AI vision actually screens (targets/bloggers/hashtags),
+    # excluding daily story likes which don't run the vision filter.
+    vision_profiles_hi = 0.0
+    # Story likes are counted separately (they don't go through the profile flow).
+    story_likes_lo = 0.0
+    story_likes_hi = 0.0
 
-    # Reels (runs first each session — always 1 post when queue is enabled)
+    # Reels: when post-reels >= 1 in config.yml, publish up to posts-per-session
+    # from post_reel.yml back-to-back at session start (capped by queue size).
     reel_lo, reel_hi, reel_mid = parse_range(config.get("post-reels"), 0)
-    if reel_mid <= 0:
-        reel_mid = float(post_reel.get("posts-per-session") or 0)
-        reel_lo = reel_hi = reel_mid
-    if reel_mid > 0:
+    per_session = parse_range((post_reel or {}).get("posts-per-session"), 1)[2]
+    reels_this_session = 0
+    if reel_mid >= 1:
+        reels_this_session = int(min(reel_hi, per_session, reel_mid))
+        reel_lo = reel_hi = float(reels_this_session)
+    if reels_this_session:
         reel_sec_lo = reel_sec_hi = SECONDS_PER_REEL_POST
         job_breakdown.append(
             {
                 "job": "post-reels",
-                "label": "Post 1 reel",
+                "label": f"Post {reels_this_session} reel(s)",
                 "minutes": _format_range(reel_sec_lo / 60, reel_sec_hi / 60),
             }
         )
+    else:
+        reel_lo = reel_hi = 0.0
 
     # Feed likes
     feed_lo, feed_hi, feed_mid = parse_range(config.get("feed"), 0)
@@ -231,6 +274,7 @@ def estimate_session(config: dict[str, Any], *, post_reel: dict[str, Any] | None
     if iul_mid > 0:
         expected_profiles_lo += iul_lo
         expected_profiles_hi += iul_hi
+        vision_profiles_hi += iul_hi
         job_breakdown.append(
             {
                 "job": "interact-from-file",
@@ -247,7 +291,7 @@ def estimate_session(config: dict[str, Any], *, post_reel: dict[str, Any] | None
         if story_list:
             sl_lo = sl_hi = sl_mid = float(len(story_list))
     if story_enabled and sl_mid > 0:
-        story_sec_lo, story_sec_hi = 18, 35
+        story_sec_lo, story_sec_hi = 6, 12
         job_breakdown.append(
             {
                 "job": "daily-story-likes",
@@ -257,6 +301,8 @@ def estimate_session(config: dict[str, Any], *, post_reel: dict[str, Any] | None
         )
         expected_profiles_lo += sl_lo * 0.5
         expected_profiles_hi += sl_hi
+        story_likes_lo = sl_lo
+        story_likes_hi = sl_hi
 
     # Blogger / hashtag jobs
     for key in sorted(BLOGGER_JOBS | HASHTAG_JOBS):
@@ -271,6 +317,7 @@ def estimate_session(config: dict[str, Any], *, post_reel: dict[str, Any] | None
         p_hi = src_hi * ic_hi * pct_hi
         expected_profiles_lo += p_lo
         expected_profiles_hi += p_hi
+        vision_profiles_hi += p_hi
         job_breakdown.append(
             {
                 "job": key,
@@ -281,6 +328,7 @@ def estimate_session(config: dict[str, Any], *, post_reel: dict[str, Any] | None
 
     # Unfollow / remove
     unfollow_sec_lo = unfollow_sec_hi = 0.0
+    unfollow_count_lo = unfollow_count_hi = 0.0
     for key, label, per_sec in (
         ("unfollow-from-list", "Unfollow from list", SECONDS_PER_UNFOLLOW),
         ("unfollow", "Unfollow", SECONDS_PER_UNFOLLOW),
@@ -295,11 +343,56 @@ def estimate_session(config: dict[str, Any], *, post_reel: dict[str, Any] | None
             continue
         unfollow_sec_lo += lo * per_sec
         unfollow_sec_hi += hi * per_sec
+        unfollow_count_lo += lo
+        unfollow_count_hi += hi
         job_breakdown.append(
             {
                 "job": key,
                 "label": label,
                 "minutes": _format_range(lo * per_sec / 60, hi * per_sec / 60),
+            }
+        )
+    # Unfollows are capped per session by total-unfollows-limit.
+    if unfollow_count_hi > 0:
+        uc_lo, uc_hi, _ = parse_range(config.get("total-unfollows-limit"), 0)
+        if uc_lo > 0:
+            unfollow_count_lo = min(unfollow_count_lo, uc_lo)
+        if uc_hi > 0:
+            unfollow_count_hi = min(unfollow_count_hi, uc_hi)
+
+    # AI vision applies to profile-visit jobs (targets / bloggers / hashtags).
+    has_profile_jobs = vision_profiles_hi > 0
+    if vision_enabled and has_profile_jobs:
+        pass_pct = round(vision_pass_ratio * 100)
+        vision_note = f"AI vision on: adds ~{int(VISION_SECONDS_LO)}–{int(VISION_SECONDS_HI)}s per profile"
+        if ai_comment_enabled:
+            vision_note += " + AI comments"
+        job_breakdown.append(
+            {
+                "job": "follow-vision",
+                "label": f"AI vision screening (~{pass_pct}% pass)",
+                "minutes": vision_note,
+            }
+        )
+        warnings.append(
+            {
+                "level": "info",
+                "message": (
+                    f"AI vision is enabled — each profile is screenshotted and sent to "
+                    f"OpenAI before interacting (~{int(VISION_SECONDS_LO)}–{int(VISION_SECONDS_HI)}s each). "
+                    f"Roughly {pass_pct}% pass, so the bot visits more profiles (and makes "
+                    f"more API calls) to hit your successful-interactions limit."
+                ),
+            }
+        )
+    elif vision_enabled and not has_profile_jobs:
+        warnings.append(
+            {
+                "level": "info",
+                "message": (
+                    "AI vision is enabled but no profile-visit jobs (targets, bloggers, "
+                    "hashtags) are configured, so it won't screen anyone this session."
+                ),
             }
         )
 
@@ -319,31 +412,188 @@ def estimate_session(config: dict[str, Any], *, post_reel: dict[str, Any] | None
         config.get("total-interactions-limit"), 280
     )
     cap_likes_lo, cap_likes_hi, cap_likes_mid = parse_range(config.get("total-likes-limit"), 135)
+    cap_follows_lo, cap_follows_hi, _ = parse_range(config.get("total-follows-limit"), 0)
+    cap_comments_lo, cap_comments_hi, _ = parse_range(config.get("total-comments-limit"), 0)
+    cap_pm_lo, cap_pm_hi, _ = parse_range(config.get("total-pm-limit"), 0)
 
     likes_pct = parse_range(config.get("likes-percentage"), 100)[2] / 100
     likes_per_prof = parse_range(config.get("likes-count"), 1)[2]
+    follow_pct = parse_range(config.get("follow-percentage"), 0)[2] / 100
+    comment_pct = parse_range(config.get("comment-percentage"), 0)[2] / 100
+    pm_pct = parse_range(config.get("private-messages-percentage") or config.get("pm-percentage"), 0)[2] / 100
+    stories_pct = parse_range(config.get("stories-percentage"), 0)[2] / 100
+    max_comments_per_user = parse_range(config.get("max-comments-pro-user"), 1)[2] or 1
 
-    # Apply caps to profile visits
-    profiles_lo = min(expected_profiles_lo, cap_success_lo, cap_total_lo)
-    profiles_hi = min(expected_profiles_hi, cap_success_hi, cap_total_hi)
+    # How many of each action happen per successful (vision-passing) profile.
+    likes_rate = likes_per_prof * likes_pct
+    comments_rate = min(comment_pct, max_comments_per_user) if comment_pct > 0 else 0.0
 
-    likes_lo = profiles_lo * likes_per_prof * likes_pct
-    likes_hi = profiles_hi * likes_per_prof * likes_pct
+    def _flag(key: str, default: bool) -> bool:
+        val = config.get(key, default)
+        if isinstance(val, str):
+            return val.strip().lower() in ("1", "true", "yes", "on")
+        return bool(val)
 
-    binding_limits: list[str] = []
-    if expected_profiles_lo > cap_success_lo:
-        binding_limits.append("total-successful-interactions-limit")
-    if expected_profiles_lo > cap_total_lo:
-        binding_limits.append("total-interactions-limit")
-    if likes_lo > cap_likes_lo and config.get("end-if-likes-limit-reached", True):
-        binding_limits.append("total-likes-limit")
+    # Which per-action limits actually END the session (vs. just capping the count).
+    end_if_likes = _flag("end-if-likes-limit-reached", True)
+    end_if_follows = _flag("end-if-follows-limit-reached", False)
+    end_if_comments = _flag("end-if-comments-limit-reached", False)
+    end_if_pm = _flag("end-if-pm-limit-reached", False)
 
-    if not binding_limits and expected_profiles_lo > 0:
-        binding_label = "job volume (under session caps)"
-    elif binding_limits:
-        binding_label = binding_limits[0].replace("total-", "").replace("-limit", "")
+    # Job volume expressed as successful (vision-passing) interactions.
+    job_success_lo = expected_profiles_lo * vision_pass_ratio
+    job_success_hi = expected_profiles_hi * vision_pass_ratio
+
+    # Everything that can END the session, expressed as a ceiling on successful
+    # interactions. total-successful and total-interactions always end it; the
+    # per-action limits only end it when their end-if-*-limit-reached flag is on.
+    # e.g. with follow-percentage 100 + end-if-follows-limit-reached true, the
+    # session stops after `total-follows-limit` follows — which also bounds how
+    # many likes/comments can happen, since they run on the same profiles.
+    success_caps: list[tuple[str, float, float]] = [
+        ("total-successful-interactions-limit", cap_success_lo, cap_success_hi),
+        (
+            "total-interactions-limit",
+            cap_total_lo * vision_pass_ratio,
+            cap_total_hi * vision_pass_ratio,
+        ),
+    ]
+    if end_if_likes and likes_rate > 0 and cap_likes_hi > 0:
+        success_caps.append(
+            ("total-likes-limit", cap_likes_lo / likes_rate, cap_likes_hi / likes_rate)
+        )
+    if end_if_follows and follow_pct > 0 and cap_follows_hi > 0:
+        success_caps.append(
+            ("total-follows-limit", cap_follows_lo / follow_pct, cap_follows_hi / follow_pct)
+        )
+    if end_if_comments and comments_rate > 0 and cap_comments_hi > 0:
+        success_caps.append(
+            (
+                "total-comments-limit",
+                cap_comments_lo / comments_rate,
+                cap_comments_hi / comments_rate,
+            )
+        )
+    if end_if_pm and pm_pct > 0 and cap_pm_hi > 0:
+        success_caps.append(("total-pm-limit", cap_pm_lo / pm_pct, cap_pm_hi / pm_pct))
+
+    # Successful interactions = the smallest ceiling (or job volume, if under caps).
+    candidates = success_caps + [
+        ("job volume (under session caps)", job_success_lo, job_success_hi)
+    ]
+    successful_lo = min(c[1] for c in candidates)
+    successful_hi = min(c[2] for c in candidates)
+    binder = min(candidates, key=lambda c: c[1])
+    binding_limits = [
+        c[0] for c in success_caps if c[1] <= successful_lo + 1e-9
+    ]
+
+    if binder[0] == "job volume (under session caps)":
+        binding_label = (
+            "job volume (under session caps)" if job_success_hi > 0 else "startup / idle"
+        )
     else:
-        binding_label = "startup / idle"
+        binding_label = binder[0].replace("total-", "").replace("-limit", "")
+
+    # Profiles VISITED = successful / pass-ratio (vision skips the rest).
+    profiles_lo = successful_lo / vision_pass_ratio if vision_pass_ratio else successful_lo
+    profiles_hi = successful_hi / vision_pass_ratio if vision_pass_ratio else successful_hi
+
+    likes_lo = successful_lo * likes_rate
+    likes_hi = successful_hi * likes_rate
+
+    # Per-action outcome estimates (what actually happens), each honoring its
+    # percentage setting and its own session cap. Only surfaced when applicable.
+    def _capped(lo: float, hi: float, cap_key: str) -> tuple[float, float]:
+        c_lo, c_hi, _ = parse_range(config.get(cap_key), 0)
+        if c_lo > 0:
+            lo = min(lo, c_lo)
+        if c_hi > 0:
+            hi = min(hi, c_hi)
+        return lo, hi
+
+    action_estimates: list[dict[str, Any]] = []
+
+    likes_capped_lo, likes_capped_hi = _capped(likes_lo, likes_hi, "total-likes-limit")
+    if likes_capped_hi >= 1:
+        action_estimates.append(
+            {"action": "likes", "label": "Likes", "low": round(likes_capped_lo), "high": round(likes_capped_hi)}
+        )
+
+    if follow_pct > 0:
+        fol_lo, fol_hi = successful_lo * follow_pct, successful_hi * follow_pct
+        fol_lo, fol_hi = _capped(fol_lo, fol_hi, "total-follows-limit")
+        if fol_hi >= 1:
+            action_estimates.append(
+                {"action": "follows", "label": "Accounts followed", "low": round(fol_lo), "high": round(fol_hi)}
+            )
+
+    if story_likes_hi >= 1:
+        action_estimates.append(
+            {
+                "action": "story_likes",
+                "label": "Story likes",
+                "low": round(story_likes_lo),
+                "high": round(story_likes_hi),
+            }
+        )
+    elif stories_pct > 0:
+        # Stories watched during profile visits (not the daily-story-likes job).
+        st_lo, st_hi = successful_lo * stories_pct, successful_hi * stories_pct
+        if st_hi >= 1:
+            action_estimates.append(
+                {"action": "stories", "label": "Stories watched", "low": round(st_lo), "high": round(st_hi)}
+            )
+
+    comment_sec_lo = comment_sec_hi = 0.0
+    if comment_pct > 0:
+        com_lo, com_hi = successful_lo * comments_rate, successful_hi * comments_rate
+        com_lo, com_hi = _capped(com_lo, com_hi, "total-comments-limit")
+        if com_hi >= 1:
+            per_comment = SECONDS_PER_COMMENT + (
+                SECONDS_PER_AI_COMMENT_GEN if ai_comment_enabled else 0.0
+            )
+            comment_sec_lo = com_lo * per_comment
+            comment_sec_hi = com_hi * per_comment
+            action_estimates.append(
+                {
+                    "action": "comments",
+                    "label": "AI comments" if ai_comment_enabled else "Comments",
+                    "low": round(com_lo),
+                    "high": round(com_hi),
+                    "ai_generated": ai_comment_enabled,
+                }
+            )
+
+    if pm_pct > 0:
+        pm_lo, pm_hi = successful_lo * pm_pct, successful_hi * pm_pct
+        pm_lo, pm_hi = _capped(pm_lo, pm_hi, "total-pm-limit")
+        if pm_hi >= 1:
+            action_estimates.append(
+                {"action": "pms", "label": "DMs sent", "low": round(pm_lo), "high": round(pm_hi)}
+            )
+
+    if unfollow_count_hi >= 1:
+        action_estimates.append(
+            {
+                "action": "unfollows",
+                "label": "Unfollows",
+                "low": round(unfollow_count_lo),
+                "high": round(unfollow_count_hi),
+            }
+        )
+
+    # Total actions per session = sum of every real action (likes, follows,
+    # unfollows, comments, DMs, story likes). Stories *watched* are passive and
+    # excluded. Instagram-safety folklore counts follows+unfollows+likes toward a
+    # combined daily cap, so this total helps gauge how sessions/day stack up.
+    total_actions_lo = 0.0
+    total_actions_hi = 0.0
+    for a in action_estimates:
+        if a["action"] == "stories":
+            continue
+        total_actions_lo += a["low"]
+        total_actions_hi += a["high"]
 
     interact_sec_lo = profiles_lo * prof_lo
     interact_sec_hi = profiles_hi * prof_hi
@@ -361,6 +611,7 @@ def estimate_session(config: dict[str, Any], *, post_reel: dict[str, Any] | None
         + feed_sec_lo
         + post_url_sec
         + interact_sec_lo
+        + comment_sec_lo
         + unfollow_sec_lo
         + TEARDOWN_SECONDS
     )
@@ -371,6 +622,7 @@ def estimate_session(config: dict[str, Any], *, post_reel: dict[str, Any] | None
         + feed_sec_hi
         + post_url_sec
         + interact_sec_hi
+        + comment_sec_hi
         + unfollow_sec_hi
         + TEARDOWN_SECONDS
     )
@@ -474,6 +726,21 @@ def estimate_session(config: dict[str, Any], *, post_reel: dict[str, Any] | None
         "expected_profiles": {
             "low": round(profiles_lo),
             "high": round(profiles_hi),
+        },
+        "successful_interactions": {
+            "low": round(successful_lo),
+            "high": round(successful_hi),
+        },
+        "action_estimates": action_estimates,
+        "total_actions": {
+            "low": round(total_actions_lo),
+            "high": round(total_actions_hi),
+        },
+        "ai_vision": {
+            "enabled": vision_enabled,
+            "screens_profiles": vision_enabled and has_profile_jobs,
+            "pass_ratio": round(vision_pass_ratio, 2),
+            "ai_comments": ai_comment_enabled,
         },
         "job_breakdown": job_breakdown,
         "schedule": {

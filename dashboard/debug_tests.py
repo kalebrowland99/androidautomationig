@@ -211,6 +211,7 @@ DebugKind = Literal[
     "ig_profile_tap_following",
     "ig_following_open_first",
     "ig_followers_scroll",
+    "ig_followers_detect_suggested",
     "ig_profile_open_account_menu",
     "ig_account_switch_user",
     "ig_profile_detect_story_ring",
@@ -424,6 +425,7 @@ DEBUG_GROUP_ORDER: dict[str, list[str]] = {
         "ig-followers-open-first",
         "ig-back-to-followers",
         "ig-followers-scroll",
+        "ig-followers-detect-suggested",
         "ig-back-to-profile-2",
         "ig-profile-tap-following",
         "ig-following-open-first",
@@ -658,6 +660,10 @@ DEBUG_TESTS: dict[str, DebugTest] = {
     "ig-followers-scroll": {
         "label": "Followers list → scroll down",
         "kind": "ig_followers_scroll",
+    },
+    "ig-followers-detect-suggested": {
+        "label": "Followers list → detect 'Suggested for you' boundary",
+        "kind": "ig_followers_detect_suggested",
     },
     "ig-profile-open-account-menu": {
         "label": "Profile → open account switcher menu",
@@ -1150,6 +1156,11 @@ DEBUG_KIND_DETECTS: dict[str, str] = {
         f"Stop at text 'Suggested for you' — rows below are not followers\n"
         f"{IG}/list className android.widget.ListView — fling DOWN if no See more"
     ),
+    "ig_followers_detect_suggested": (
+        "text 'Suggested for you' (case-insensitive) → boundary header\n"
+        "Reports header Y + how many on-screen rows sit below it (skipped as suggestions)\n"
+        "Assumes a followers/following list is already open on screen"
+    ),
     "ig_profile_open_account_menu": f"{IG}/action_bar_title_chevron (account switcher)",
     "ig_account_switch_user": (
         f"Farm → phones table @handle for this device (not Tools → Debug target)\n"
@@ -1159,8 +1170,8 @@ DEBUG_KIND_DETECTS: dict[str, str] = {
     "ig_profile_detect_story_ring": f"{IG}/reel_ring on profile header",
     "ig_profile_skip_top_posts": (
         "PostsGridView on profile grid:\n"
-        "  · should_skip_cell(row, col, skip-top-profile-posts)\n"
-        "  · open_first_post_after_skip(skip-top-profile-posts)"
+        "  · skip-first-row → open post whose a11y desc is 'row 2, column 1'\n"
+        "  · otherwise open the first post (row 1, col 1)"
     ),
     "ig_profile_open_stories": (
         f"{IG}/reel_ring (tap)\n"
@@ -1169,9 +1180,9 @@ DEBUG_KIND_DETECTS: dict[str, str] = {
     "ig_story_detect_like": f"{IG}/toolbar_like_button",
     "ig_daily_story_likes": (
         "handle_daily_story_likes_from_file flow for one @username:\n"
-        "  · Search → profile\n"
+        "  · adb VIEW instagram.com/username URL\n"
         "  · has_unviewed_story()\n"
-        "  · like_all_profile_stories(require_unviewed=True)"
+        "  · like_all_profile_stories(always_like_stories=True)"
     ),
     "ig_story_tap_like": f"{IG}/toolbar_like_button (tap)",
     "ig_search_open_hashtag": (
@@ -1225,9 +1236,9 @@ DEBUG_KIND_DETECTS: dict[str, str] = {
     ),
     "ig_feed_swipe": "Pull-to-refresh swipe UP (UniversalActions._swipe_points)",
     "ig_bpl_production_nav": (
-        "Production nav_to_post_likers(device, @user, my_username, skip_top_profile_posts):\n"
+        "Production nav_to_post_likers(device, @user, my_username, skip_first_row):\n"
         "  · Search → profile (or own profile tab)\n"
-        "  · PostsGridView.open_first_post_after_skip(skip-top-profile-posts)"
+        "  · skip-first-row → open post whose a11y desc is 'row 2, column 1'"
     ),
     "ig_bpl_production_check_post": (
         "Production PostsViewList._check_if_last_post('', blogger-post-likers)\n"
@@ -1625,20 +1636,22 @@ def _account_for_device_or_fail(
     return account_id, None
 
 
-def _skip_top_profile_posts_for_serial(serial: str, device: DeviceFacade, test_id: str) -> int:
+def _skip_first_row_for_serial(serial: str, device: DeviceFacade, test_id: str) -> bool:
     from GramAddict.core.utils import get_value
     from dashboard.gramaddict_config import get_account
 
     account_id, err = _account_for_device_or_fail(serial, device, test_id)
     if err:
-        return 3
+        return False
     form = get_account(account_id or "").get("form") or {}
-    raw = str(
-        form.get("skip-top-profile-posts")
-        or form.get("skip-pinned-posts")
-        or "3"
-    ).strip() or "3"
-    return max(0, int(get_value(raw, None, 3) or 3))
+    if "skip-first-row" in form:
+        return bool(form.get("skip-first-row"))
+    # Legacy fallback: numeric skip-top-profile-posts > 0 means skip the row.
+    raw = str(form.get("skip-top-profile-posts") or form.get("skip-pinned-posts") or "0").strip()
+    try:
+        return int(get_value(raw or "0", None, 0) or 0) > 0
+    except (ValueError, TypeError):
+        return False
 
 
 def _search_followers_list(device: DeviceFacade, username: str) -> bool:
@@ -2577,9 +2590,9 @@ def run_debug_test(
     if kind == "ig_nav_post_likers":
         username = _require_target(target_username)
         my_username = _require_device_username(serial)
-        skip_top = _skip_top_profile_posts_for_serial(serial, device, test_id)
+        skip_first_row = _skip_first_row_for_serial(serial, device, test_id)
         if not nav_to_post_likers(
-            device, username, my_username, skip_top_profile_posts=skip_top
+            device, username, my_username, skip_first_row=skip_first_row
         ):
             return _fail(
                 serial,
@@ -2736,6 +2749,49 @@ def run_debug_test(
             }
         return {"success": True, "message": "Scrolled followers list one step", "test_id": test_id}
 
+    if kind == "ig_followers_detect_suggested":
+        from GramAddict.core.handle_sources import (
+            item_at_or_below_y,
+            suggested_for_you_top,
+        )
+
+        suggested_top = suggested_for_you_top(device)
+        if suggested_top is None:
+            return _fail(
+                serial,
+                device,
+                test_id,
+                "'Suggested for you' header not detected on this screen",
+                target=(
+                    "Trying to detect:\n"
+                    "  · text 'Suggested for you' (case-insensitive)\n"
+                    "  · Open a user's followers/following list, then run this while "
+                    "the Suggested-for-you section is visible."
+                ),
+            )
+
+        user_list = device.find(
+            resourceIdMatches=case_insensitive_re(ResourceID.USER_LIST_CONTAINER),
+        )
+        total_rows = 0
+        suggestion_rows = 0
+        if user_list.exists(Timeout.MEDIUM):
+            for item in user_list:
+                total_rows += 1
+                if item_at_or_below_y(item, suggested_top):
+                    suggestion_rows += 1
+        real_rows = max(0, total_rows - suggestion_rows)
+        return {
+            "success": True,
+            "message": (
+                f"'Suggested for you' detected at y={suggested_top}. "
+                f"Of {total_rows} visible row(s): {real_rows} real follower row(s) "
+                f"above the boundary, {suggestion_rows} suggestion row(s) below "
+                f"(these are skipped by the bot)."
+            ),
+            "test_id": test_id,
+        }
+
     if kind == "ig_profile_open_account_menu":
         selector = device.find(resourceId=ResourceID.ACTION_BAR_TITLE_CHEVRON)
         if not selector.exists(Timeout.MEDIUM):
@@ -2792,26 +2848,29 @@ def run_debug_test(
                 f"Could not open @{username}",
                 target="Trying to detect:\n  · Search → profile",
             )
-        skip_top = _skip_top_profile_posts_for_serial(serial, device, test_id)
+        skip_first_row = _skip_first_row_for_serial(serial, device, test_id)
+        from GramAddict.core.navigation import open_second_row_first_post
+
         grid = PostsGridView(device)
-        if not grid.is_post_tappable(0, 0):
-            ProfileView(device).swipe_to_fit_posts()
-        lines: list[str] = [f"skip-top-profile-posts={skip_top}"]
-        for row in range(3):
-            for col in range(3):
-                if not grid.is_post_tappable(row, col):
-                    continue
-                skip_cell = grid.should_skip_cell(row, col, skip_top)
-                lines.append(f"row {row + 1} col {col + 1}: skip={skip_cell}")
-        opened, _, _ = grid.open_first_post_after_skip(skip_top)
-        if opened is None:
+        lines = [f"skip-first-row={skip_first_row}"]
+        if skip_first_row:
+            # Open the first post of the second row via a11y content-desc
+            # (coordinate tap is used only as an internal fallback).
+            opened = open_second_row_first_post(device)
+        else:
+            if not grid.is_post_tappable(0, 0):
+                ProfileView(device).swipe_to_fit_posts()
+            opened_view, _, _ = grid.navigateToPost(0, 0)
+            opened = opened_view is not None
+        if not opened:
             return _fail(
                 serial,
                 device,
                 test_id,
-                "No post found after skipping top grid slots",
+                "No post found after skipping the first row",
                 target=DEBUG_KIND_DETECTS["ig_profile_skip_top_posts"],
             )
+        lines.append("opened post: OK")
         device.back()
         random_sleep(0.5, 1, modulable=False)
         return {
@@ -2853,27 +2912,30 @@ def run_debug_test(
         from GramAddict.core import utils as ga_utils
         from GramAddict.core.interaction import like_all_profile_stories
         from GramAddict.core.session_state import SessionState
-        from GramAddict.core.views import ProfileView, TabBarView
+        from GramAddict.core.views import ProfileView
         from types import SimpleNamespace
 
         username = _require_target(target_username)
-        search_view = TabBarView(device).navigateToSearch()
-        if not search_view.navigate_to_target(username, "daily-story-likes"):
+        from GramAddict.core.utils import navigate_to_profile_via_url
+
+        opened, account_missing = navigate_to_profile_via_url(device, username)
+        if account_missing:
             return _fail(
                 serial,
                 device,
                 test_id,
-                f"Could not open @{username}",
-                target="Trying to detect:\n  · Search → profile",
+                f"@{username} does not exist (profile unavailable)",
+                target="Trying to detect:\n  · adb VIEW instagram.com/username URL\n  · unavailable-page copy",
+            )
+        if not opened:
+            return _fail(
+                serial,
+                device,
+                test_id,
+                f"Could not open @{username} via profile URL",
+                target="Trying to detect:\n  · adb VIEW instagram.com/username URL\n  · ProfileView action bar / followers tab",
             )
         profile_view = ProfileView(device, is_own_profile=False)
-        if not profile_view.has_unviewed_story():
-            device.back()
-            return {
-                "success": True,
-                "message": f"@{username} has no new story — skip (production behavior)",
-                "test_id": test_id,
-            }
         stories_count = "1-1"
         account_id, err = _account_for_device_or_fail(serial, device, test_id)
         if not err and account_id:
@@ -2893,7 +2955,7 @@ def run_debug_test(
             username,
             args,
             session_state,
-            require_unviewed=True,
+            always_like_stories=True,
         )
         device.back()
         random_sleep(0.5, 1, modulable=False)
@@ -4671,9 +4733,9 @@ def run_debug_test(
 
         if kind in ("ig_bpl_production_nav", "ig_bpl_production_full"):
             _step("nav_to_post_likers…")
-            skip_top = _skip_top_profile_posts_for_serial(serial, device, test_id)
+            skip_first_row = _skip_first_row_for_serial(serial, device, test_id)
             if not nav_to_post_likers(
-                device, username, my_username, skip_top_profile_posts=skip_top
+                device, username, my_username, skip_first_row=skip_first_row
             ):
                 return _fail(
                     serial,

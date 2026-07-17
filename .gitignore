@@ -12,6 +12,7 @@
 .DS_Store
 crashes
 accounts
+videos/.tmp/
 !config-examples/*
 .cursor/
 tools/scrcpy-macos-x86_64-v3.3.4/

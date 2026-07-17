@@ -1,9 +1,10 @@
 import logging
+import shutil
 import string
 from datetime import datetime
 from enum import Enum, auto
 from inspect import stack
-from os import getcwd, listdir
+from pathlib import Path
 from random import randint, uniform
 from re import search
 from subprocess import PIPE, run
@@ -12,9 +13,15 @@ from typing import Optional
 
 import uiautomator2
 
-from GramAddict.core.utils import random_sleep
+from GramAddict.core.utils import check_instagram_rate_limit, random_sleep
 
 logger = logging.getLogger(__name__)
+
+# Plain (unzipped) screen recordings land here — easy to browse.
+VIDEOS_DIR = Path("videos")
+VIDEOS_CRASHED_DIR = VIDEOS_DIR / "crashed"
+VIDEOS_SESSIONS_DIR = VIDEOS_DIR / "sessions"
+VIDEOS_TMP_DIR = VIDEOS_DIR / ".tmp"
 
 
 def create_device(device_id, app_id):
@@ -139,7 +146,50 @@ class DeviceFacade:
         self.deviceV2.press("back")
         random_sleep(modulable=modulable)
 
-    def start_screenrecord(self, output="debug_0000.mp4", fps=20):
+    def _screenrecord_account_slug(self) -> str:
+        """Best-effort account name for the video filename."""
+        try:
+            from GramAddict.core import utils as _utils
+
+            username = getattr(getattr(_utils, "args", None), "username", None)
+            if username:
+                return str(username).lstrip("@").replace("/", "_")
+        except Exception:
+            pass
+        serial = str(getattr(self, "device_id", "") or "device")
+        return serial[-8:] if len(serial) > 8 else serial or "device"
+
+    def _archive_screenrecord(self, src: Path, *, crashed: bool) -> Optional[Path]:
+        """Move a finished recording into videos/crashed or videos/sessions."""
+        if not src.is_file() or src.stat().st_size <= 0:
+            try:
+                src.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return None
+        dest_dir = VIDEOS_CRASHED_DIR if crashed else VIDEOS_SESSIONS_DIR
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        slug = self._screenrecord_account_slug()
+        kind = "crash" if crashed else "session"
+        dest = dest_dir / f"{stamp}_{slug}_{kind}.mp4"
+        n = 2
+        while dest.exists():
+            dest = dest_dir / f"{stamp}_{slug}_{kind}_{n}.mp4"
+            n += 1
+        try:
+            shutil.move(str(src), str(dest))
+        except OSError as exc:
+            logger.warning("Could not archive screen recording to %s: %s", dest, exc)
+            return None
+        logger.info(
+            "Screen recording saved → %s",
+            dest,
+        )
+        return dest
+
+    def start_screenrecord(self, output=None, fps=20):
+        """Start screen recording into videos/.tmp (archived on stop)."""
         import imageio
 
         def _run_MOD(self):
@@ -150,21 +200,18 @@ class DeviceFacade:
             for p in pipelines:
                 _iter = p(_iter)
 
+            # Keep ~30s of frames; always write them on stop (normal OR crash)
+            # so videos/sessions gets usable clips too.
             with imageio.get_writer(self._filename, fps=self._fps) as wr:
                 frames = deque(maxlen=self._fps * 30)
                 for im in _iter:
                     frames.append(im)
-                if self.crash:
-                    for frame in frames:
-                        wr.append_data(frame)
+                for frame in frames:
+                    wr.append_data(frame)
             self._done_event.set()
 
         def stop_MOD(self, crash=True):
-            """
-            stop record and finish write video
-            Returns:
-                bool: whether video is recorded.
-            """
+            """Stop record and finish writing the video."""
             if self._running:
                 self.crash = crash
                 self._stop_event.set()
@@ -180,17 +227,41 @@ class DeviceFacade:
 
         _sr.Screenrecord._run = _run_MOD
         _sr.Screenrecord.stop = stop_MOD
-        mp4_files = [f for f in listdir(getcwd()) if f.endswith(".mp4")]
-        if mp4_files:
-            last_mp4 = mp4_files[-1]
-            debug_number = "{0:0=4d}".format(int(last_mp4[-8:-4]) + 1)
-            output = f"debug_{debug_number}.mp4"
+
+        VIDEOS_TMP_DIR.mkdir(parents=True, exist_ok=True)
+        VIDEOS_CRASHED_DIR.mkdir(parents=True, exist_ok=True)
+        VIDEOS_SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        if output is None:
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            serial = str(getattr(self, "device_id", "") or "dev")[-8:]
+            output = str(VIDEOS_TMP_DIR / f"recording_{serial}_{stamp}.mp4")
+        self._screenrecord_path = Path(output)
         self.deviceV2.screenrecord(output, fps)
-        logger.warning("Screen recording has been started.")
+        logger.warning("Screen recording has been started → %s", output)
 
     def stop_screenrecord(self, crash=True):
-        if self.deviceV2.screenrecord.stop(crash=crash):
+        """Stop recording and archive to videos/crashed or videos/sessions."""
+        ok = False
+        try:
+            ok = bool(self.deviceV2.screenrecord.stop(crash=crash))
+        except Exception as exc:
+            logger.debug("Screen recorder stop raised: %s", exc)
+        if ok:
             logger.warning("Screen recorder has been stopped successfully!")
+        src = getattr(self, "_screenrecord_path", None)
+        if src is None:
+            # Fallback: newest file in the temp dir.
+            try:
+                candidates = sorted(
+                    VIDEOS_TMP_DIR.glob("recording_*.mp4"),
+                    key=lambda p: p.stat().st_mtime,
+                )
+                src = candidates[-1] if candidates else None
+            except OSError:
+                src = None
+        if src is not None:
+            self._archive_screenrecord(Path(src), crashed=bool(crash))
+        return ok
 
     def screenshot(self, path=None):
         if path is None:
@@ -206,6 +277,19 @@ class DeviceFacade:
     def press_power(self):
         self.deviceV2.press("power")
         sleep(2)
+
+    def close_all_apps(self):
+        """Force-stop every running third-party app, then land on the Android
+        home screen. Used at session start for a clean slate."""
+        try:
+            self.deviceV2.app_stop_all()
+        except Exception as e:
+            logger.debug(f"Could not stop all apps: {e}")
+        try:
+            self.deviceV2.press("home")
+        except Exception as e:
+            logger.debug(f"Could not press home: {e}")
+        sleep(1)
 
     def is_screen_locked(self):
         data = run(
@@ -483,7 +567,38 @@ class DeviceFacade:
             except uiautomator2.JSONRPCError as e:
                 raise DeviceFacade.JsonRpcError(e)
 
-        def click(self, mode=None, sleep=None, coord=None, crash_report_if_fails=True):
+        def _recover_and_reclick(
+            self, error, mode, sleep, coord, crash_report_if_fails
+        ):
+            """A click failed because the element isn't there — often a popup is
+            covering it. Ask the vision model to dismiss the popup and, if it did,
+            retry the click once. Otherwise re-raise the original error."""
+            check_instagram_rate_limit(self.deviceV2)
+            try:
+                from GramAddict.core.vision_popup import dismiss_popup_with_vision
+
+                dismissed = dismiss_popup_with_vision(self.deviceV2, reason="click")
+            except Exception:
+                dismissed = False
+            if not dismissed:
+                raise DeviceFacade.JsonRpcError(error)
+            random_sleep(1, 2, modulable=False)
+            self.click(
+                mode,
+                sleep,
+                coord,
+                crash_report_if_fails,
+                _allow_vision_retry=False,
+            )
+
+        def click(
+            self,
+            mode=None,
+            sleep=None,
+            coord=None,
+            crash_report_if_fails=True,
+            _allow_vision_retry=True,
+        ):
             if coord is None:
                 coord = []
             mode = Location.WHOLE if mode is None else mode
@@ -526,6 +641,11 @@ class DeviceFacade:
                     return
                 except uiautomator2.JSONRPCError as e:
                     if crash_report_if_fails:
+                        if _allow_vision_retry:
+                            self._recover_and_reclick(
+                                e, mode, sleep, coord, crash_report_if_fails
+                            )
+                            return
                         raise DeviceFacade.JsonRpcError(e)
                     else:
                         logger.debug("Trying to press on a obj which is gone.")
@@ -556,6 +676,11 @@ class DeviceFacade:
 
             except uiautomator2.JSONRPCError as e:
                 if crash_report_if_fails:
+                    if _allow_vision_retry:
+                        self._recover_and_reclick(
+                            e, mode, sleep, coord, crash_report_if_fails
+                        )
+                        return
                     raise DeviceFacade.JsonRpcError(e)
                 else:
                     logger.debug("Trying to press on a obj which is gone.")

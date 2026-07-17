@@ -150,14 +150,44 @@ def stop_device_work(serial: str, *, force_delay: float = 1.0) -> None:
     schedule_force_unblock(serial, delay=force_delay)
 
 
+_hardware_id_by_serial: dict[str, str] = {}
+
+
 def _device_dict(device: Device) -> dict[str, str]:
+    hardware_id = device.hardware_id or _hardware_id_by_serial.get(device.serial, "")
+    if device.hardware_id:
+        _hardware_id_by_serial[device.serial] = device.hardware_id
     return {
         "serial": device.serial,
         "model": device.model,
         "manufacturer": device.manufacturer,
+        "hardware_id": hardware_id,
         "label": device.label,
         "status": "CONNECTED",
     }
+
+
+def get_hardware_id(serial: str) -> str:
+    """Stable hardware id for a serial (cached; falls back to a live adb read)."""
+    cached = _hardware_id_by_serial.get(serial)
+    if cached:
+        return cached
+    try:
+        from android_devices import get_hardware_id as _adb_hardware_id
+
+        hardware_id = _adb_hardware_id(resolve_adb(), serial)
+    except Exception:
+        hardware_id = ""
+    if hardware_id:
+        _hardware_id_by_serial[serial] = hardware_id
+    return hardware_id
+
+
+def get_devices_with_hardware_ids() -> list[dict[str, str]]:
+    """Full device list including hardware ids (runs getprop; slower than fast path)."""
+    adb = resolve_adb()
+    devices = list_devices(adb, serial_filter=DEVICE_SERIAL_FILTER or None, include_props=True)
+    return [_device_dict(d) for d in devices]
 
 
 def get_adb_devices(*, fast: bool = False) -> list[dict[str, str]]:
@@ -466,6 +496,11 @@ def start_mirror(serial: str) -> dict[str, str]:
     import os
 
     from dashboard.gramaddict_config import username_for_device
+
+    # Diagnostic: scrcpy is only ever launched here. If a scrcpy window appears
+    # during a run and this line does NOT print in the dashboard terminal, the
+    # mirror is being opened from outside the dashboard (e.g. tools/device_lab.py).
+    print(f"[mirror] start_mirror called for {serial}", flush=True)
 
     scrcpy = resolve_scrcpy()
     if not scrcpy:

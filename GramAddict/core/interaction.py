@@ -25,10 +25,12 @@ from GramAddict.core.resources import ResourceID as resources
 from GramAddict.core.session_state import SessionState
 from GramAddict.core.utils import (
     append_to_file,
+    check_instagram_rate_limit,
     get_value,
     random_choice,
     random_sleep,
     save_crash,
+    skip_first_row_enabled,
 )
 from GramAddict.core.views import (
     CurrentStoryView,
@@ -53,6 +55,51 @@ def load_config(config):
     args = config.args
     configs = config
     ResourceID = resources(config.args.app_id)
+
+
+def comments_are_limited(device: DeviceFacade) -> bool:
+    """True when Instagram shows that comments on this post are limited.
+
+    Exact wording varies slightly ("have been" / "is"); match the durable
+    "comments on this post" + "limited" phrase so we skip instead of typing.
+    """
+    needles = (
+        "Comments on this post have been limited",
+        "Comments on this post is limited",
+        "Comments on this post are limited",
+        "comments on this post have been limited",
+        "comments on this post is limited",
+    )
+    for text in needles:
+        if device.find(textContains=text).exists(Timeout.ZERO):
+            return True
+    # Broader fallback for wording/ellipsis differences across IG builds.
+    limited = device.find(textContains="comments on this post")
+    if limited.exists(Timeout.ZERO):
+        try:
+            shown = (limited.get_text() or "").lower()
+        except Exception:
+            shown = ""
+        if "limited" in shown:
+            return True
+    return False
+
+
+def user_comment_allowed(storage, username: str, args) -> bool:
+    """False when this user was commented within comment-cooldown-days."""
+    if storage is None:
+        return True
+    cooldown_days = get_value(
+        getattr(args, "comment_cooldown_days", None), None, 7
+    )
+    if storage.can_comment_user(username, cooldown_days):
+        return True
+    days_label = int(cooldown_days) if cooldown_days else 7
+    logger.info(
+        f"@{username}: commented within the last {days_label} day(s) — skip comment (cooldown).",
+        extra={"color": f"{Fore.CYAN}"},
+    )
+    return False
 
 
 def find_comment_thread_edittext(device: DeviceFacade):
@@ -161,6 +208,7 @@ def interact_with_user(
     session_state,
     scraping_file,
     current_mode,
+    storage=None,
 ) -> Tuple[bool, bool, bool, bool, bool, int, int, int]:
     """
     :return: (whether interaction succeed, whether @username was followed during the interaction, if you scraped that account, if you sent a PM, number of liked, number of watched, number of commented)
@@ -203,7 +251,7 @@ def interact_with_user(
     delta = format(time() - start_time, ".2f")
     logger.debug(f"Profile checked in {delta}s")
 
-    if can_follow and scraping_file is None:
+    if scraping_file is None:
         from GramAddict.core.follow_vision_account import profile_passes_follow_vision
 
         if not profile_passes_follow_vision(device, username, my_username):
@@ -351,19 +399,8 @@ def interact_with_user(
         logger.info(
             f"There {f'is {len(photos_indices)} post' if len(photos_indices)<=1 else f'are {len(photos_indices)} posts'} fully visible. Calculated in {end_time}s"
         )
-        skip_top = max(
-            0,
-            int(
-                get_value(
-                    getattr(args, "skip_top_profile_posts", None)
-                    or getattr(args, "skip_pinned_posts", None)
-                    or "3",
-                    None,
-                    3,
-                )
-                or 0
-            ),
-        )
+        # "Skip first row" removes the first grid row (top 3 slots).
+        skip_top = 3 if skip_first_row_enabled(args) else 0
         post_grid_view = PostsGridView(device)
         if skip_top:
             before = len(photos_indices)
@@ -375,7 +412,7 @@ def interact_with_user(
             skipped = before - len(photos_indices)
             if skipped:
                 logger.info(
-                    f"Skipping top {skipped} profile grid post(s) (skip-top-profile-posts={skip_top}).",
+                    f"Skipping first row: {skipped} profile grid post(s).",
                     extra={"color": f"{Fore.CYAN}"},
                 )
         if current_mode in [
@@ -426,6 +463,7 @@ def interact_with_user(
                             and can_comment_job
                             and number_of_commented
                             < max_comments_pro_user
+                            and user_comment_allowed(storage, username, args)
                             and can_comment(
                                 media_type, profile_filter, current_mode
                             )
@@ -455,7 +493,10 @@ def interact_with_user(
                 if comment_percentage != 0 and can_comment(
                     media_type, profile_filter, current_mode
                 ):
-                    if number_of_commented < max_comments_pro_user:
+                    if (
+                        number_of_commented < max_comments_pro_user
+                        and user_comment_allowed(storage, username, args)
+                    ):
                         comment_done = _comment(
                             device,
                             my_username,
@@ -557,6 +598,15 @@ def register_like(device, session_state):
     UniversalActions.detect_block(device)
     logger.debug("Like succeed.")
     session_state.totalLikes += 1
+    session_state._publish_live_progress()
+
+
+def register_story_like(session_state):
+    session_state.register_story_like()
+
+
+def register_daily_story_account(session_state):
+    session_state.register_daily_story_account()
 
 
 def is_follow_limit_reached_for_source(session_state, follow_limit, source):
@@ -783,6 +833,16 @@ def _comment(
             if comment_button.exists():
                 logger.info("Open comments of post.")
                 comment_button.click()
+                random_sleep(0.6, 1.2, modulable=False)
+                # Limited-comments sheet opens, but typing is blocked — skip the post.
+                if comments_are_limited(device):
+                    logger.info(
+                        "Comments on this post have been limited — skipping.",
+                        extra={"color": f"{Fore.CYAN}"},
+                    )
+                    universal_actions.close_keyboard(device)
+                    device.back()
+                    return False
                 comment_box = find_comment_thread_edittext(device)
                 if comment_box.exists():
                     comment = load_random_comment(my_username, media_type)
@@ -790,19 +850,46 @@ def _comment(
                         UniversalActions.close_keyboard(device)
                         device.back()
                         return False
+                    # Re-check right before typing — the limited banner sometimes
+                    # appears a beat after the compose field is visible.
+                    if comments_are_limited(device):
+                        logger.info(
+                            "Comments on this post have been limited — skipping.",
+                            extra={"color": f"{Fore.CYAN}"},
+                        )
+                        universal_actions.close_keyboard(device)
+                        device.back()
+                        return False
                     logger.info(
                         f"Write comment: {comment}", extra={"color": f"{Fore.CYAN}"}
                     )
-                    comment_box.set_text(
-                        comment, Mode.PASTE if args.dont_type else Mode.TYPE
-                    )
+                    try:
+                        comment_box.set_text(
+                            comment, Mode.PASTE if args.dont_type else Mode.TYPE
+                        )
+                    except Exception as exc:
+                        # Typing can fail when comments are limited or the field
+                        # lost focus — treat as skip rather than crashing the bot.
+                        if comments_are_limited(device):
+                            logger.info(
+                                "Comments on this post have been limited — skipping.",
+                                extra={"color": f"{Fore.CYAN}"},
+                            )
+                        else:
+                            logger.warning(f"Could not type comment: {exc}")
+                        universal_actions.close_keyboard(device)
+                        device.back()
+                        return False
 
                     post_button = device.find(
                         resourceId=ResourceID.LAYOUT_COMMENT_THREAD_POST_BUTTON_ICON
                     )
                     post_button.click()
                 else:
-                    logger.info("Comments on this post have been limited.")
+                    logger.info(
+                        "Comments on this post have been limited — skipping.",
+                        extra={"color": f"{Fore.CYAN}"},
+                    )
                     universal_actions.close_keyboard(device)
                     device.back()
                     return False
@@ -1091,6 +1178,37 @@ def _follow(device, username, follow_percentage, args, session_state, swipe_amou
     return False
 
 
+def _story_like_resource_ids():
+    """Return the initialized ResourceID instance (not the class)."""
+    global ResourceID
+    if ResourceID is None:
+        from GramAddict.core import views as ga_views
+        import GramAddict.core.utils as ga_utils
+
+        app_id = (
+            getattr(getattr(ga_utils, "args", None), "app_id", None)
+            or "com.instagram.android"
+        )
+        ResourceID = getattr(ga_views, "ResourceID", None) or resources(app_id)
+    return ResourceID
+
+
+def _find_story_like_button(device: DeviceFacade, *, fast: bool = False):
+    """Locate the story viewer heart / like control."""
+    ui_timeout = Timeout.TINY if fast else Timeout.SHORT
+    rid = _story_like_resource_ids()
+    btn = device.find(
+        resourceIdMatches=case_insensitive_re(rid.TOOLBAR_LIKE_BUTTON)
+    )
+    if btn.exists(ui_timeout):
+        return btn
+    for desc in ("Like", "like"):
+        btn = device.find(descriptionMatches=case_insensitive_re(desc))
+        if btn.exists(ui_timeout):
+            return btn
+    return None
+
+
 def like_all_profile_stories(
     device: DeviceFacade,
     profile_view: ProfileView,
@@ -1099,15 +1217,26 @@ def like_all_profile_stories(
     session_state: SessionState,
     *,
     require_unviewed: bool = False,
+    always_like_stories: bool = False,
+    daily_story_likes: bool = False,
 ) -> int:
     """Open profile stories, watch each segment, and like it. Returns segments liked."""
-    if session_state.check_limit(
+    check_instagram_rate_limit(device)
+    if not daily_story_likes and session_state.check_limit(
         limit_type=session_state.Limit.WATCHES, output=True
     ):
         logger.info("Reached total watch limit, not watching stories.")
         return 0
 
-    if require_unviewed:
+    if always_like_stories:
+        story_ui_timeout = Timeout.TINY
+        if not profile_view.has_story_to_like(ui_timeout=story_ui_timeout):
+            if profile_view.live_marker().exists(Timeout.ZERO):
+                logger.info(f"@{username} is making a live.")
+            else:
+                logger.info(f"@{username} has no story — skip.")
+            return 0
+    elif require_unviewed:
         if not profile_view.has_unviewed_story():
             logger.info(f"@{username} has no new story — skip.")
             return 0
@@ -1116,15 +1245,47 @@ def like_all_profile_stories(
             logger.info(f"@{username} is making a live.")
         return 0
 
+    likes_counter = 0
+    fast = always_like_stories
+    pause = (0.1, 0.2) if fast else (0.3, 0.6)
+    after_like = (0.1, 0.17) if fast else (0.3, 0.5)
+    story_open_sleep = SleepTime.ZERO if fast else SleepTime.DEFAULT
+    story_wait = Timeout.TINY if fast else Timeout.MEDIUM
+
+    def like_story() -> bool:
+        nonlocal likes_counter
+        for _ in range(3 if fast else 4):
+            random_sleep(*pause, modulable=False, log=False, minimum=0.05)
+            obj = _find_story_like_button(device, fast=fast)
+            if obj is None:
+                continue
+            try:
+                if not obj.get_selected():
+                    obj.click()
+                    random_sleep(*after_like, modulable=False, log=False, minimum=0.05)
+                    logger.info("Story has been liked!")
+                else:
+                    logger.info("Story is already liked!")
+                likes_counter += 1
+                if not daily_story_likes:
+                    register_story_like(session_state)
+                return True
+            except Exception as exc:
+                logger.warning("Story like tap failed: %s", exc)
+        logger.warning("Could not find story like button.")
+        return False
+
     def watch_story() -> bool:
-        if session_state.check_limit(
+        if not daily_story_likes and session_state.check_limit(
             limit_type=session_state.Limit.WATCHES, output=False
         ):
             return False
         logger.debug("Watching stories...")
-        session_state.totalWatched += 1
-        nonlocal stories_counter
-        stories_counter += 1
+        if not daily_story_likes:
+            session_state.totalWatched += 1
+        if always_like_stories:
+            like_story()
+            return True
         for _ in range(7):
             random_sleep(0.5, 1, modulable=False, log=False)
             if story_view.getUsername().strip().casefold() != username.casefold():
@@ -1132,24 +1293,14 @@ def like_all_profile_stories(
         like_story()
         return True
 
-    def like_story():
-        obj = device.find(resourceIdMatches=resources.TOOLBAR_LIKE_BUTTON)
-        if obj.exists():
-            if not obj.get_selected():
-                obj.click()
-                logger.info("Story has been liked!")
-            else:
-                logger.info("Story is already liked!")
-        else:
-            logger.info("There is no like button!")
-
     stories_to_watch: int = get_value(args.stories_count, "Stories count: {}.", 1)
-    stories_counter = 0
+    if always_like_stories:
+        stories_to_watch = max(stories_to_watch, 15)
     logger.debug("Open the story container.")
-    profile_view.StoryRing().click(sleep=SleepTime.DEFAULT)
+    profile_view.StoryRing().click(sleep=story_open_sleep)
     story_view = CurrentStoryView(device)
     story_frame = story_view.getStoryFrame()
-    story_frame.wait(Timeout.MEDIUM)
+    story_frame.wait(story_wait)
     story_username = story_view.getUsername()
     if (
         story_username == "BUG!"
@@ -1158,7 +1309,7 @@ def like_all_profile_stories(
         start = datetime.now()
         try:
             if not watch_story():
-                return stories_counter
+                return likes_counter
         except Exception as e:
             logger.debug(f"Exception: {e}")
             logger.debug(
@@ -1172,6 +1323,7 @@ def like_all_profile_stories(
                     sleep=SleepTime.ZERO,
                     crash_report_if_fails=False,
                 )
+                random_sleep(*pause, modulable=False, log=False, minimum=0.05)
                 if not watch_story():
                     break
             except Exception as e:
@@ -1188,13 +1340,14 @@ def like_all_profile_stories(
                 device.back()
             else:
                 break
-        session_state.check_limit(
-            limit_type=session_state.Limit.WATCHES, output=True
-        )
+        if not daily_story_likes:
+            session_state.check_limit(
+                limit_type=session_state.Limit.WATCHES, output=True
+            )
         logger.info(
-            f"Watched stories for {(datetime.now()-start).total_seconds():.2f}s."
+            f"Liked {likes_counter} story segment(s) in {(datetime.now()-start).total_seconds():.2f}s."
         )
-        return stories_counter
+        return likes_counter
 
     logger.warning("Failed to open the story container.")
     logger.debug(f"Story username: {story_username}")

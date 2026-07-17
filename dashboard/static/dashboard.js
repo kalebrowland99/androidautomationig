@@ -32,14 +32,28 @@ let advFileSnapshot = "";
 const autosaveTimers = {};
 const autosavePending = {};
 
+let gaLoadSpinnerTimer = null;
+
 function beginGaFormLoad() {
   gaFormLoadDepth += 1;
   gaFormLoading = true;
+  if (gaFormLoadDepth === 1) {
+    clearTimeout(gaLoadSpinnerTimer);
+    // Only reveal the spinner if the load actually drags (avoids flicker on
+    // fast account switches).
+    gaLoadSpinnerTimer = setTimeout(() => {
+      $("account-loading-overlay")?.classList.remove("hidden");
+    }, 250);
+  }
 }
 
 function endGaFormLoad() {
   gaFormLoadDepth = Math.max(0, gaFormLoadDepth - 1);
   gaFormLoading = gaFormLoadDepth > 0;
+  if (gaFormLoadDepth === 0) {
+    clearTimeout(gaLoadSpinnerTimer);
+    $("account-loading-overlay")?.classList.add("hidden");
+  }
 }
 
 function scheduleAutosave(kind, fn, delay = 900) {
@@ -114,13 +128,104 @@ function log(message, level = "info") {
   const ts = formatLogTime();
   line.className = `log-line log-${level}`;
   line.textContent = `[${ts}] ${message}`;
+  el.insertBefore(line, el.firstChild);
+  if (autoscroll) el.scrollTop = 0;
+}
+
+// Append a line verbatim (no wall-clock prefix) — used for on-disk log history,
+// whose lines already carry their own "[MM/DD HH:MM:SS] LEVEL | …" timestamp.
+function logRaw(message, level = "info") {
+  const el = $("unified-log");
+  if (!el) return;
+  const line = document.createElement("div");
+  line.className = `log-line log-${level}`;
+  line.textContent = message;
   el.appendChild(line);
-  if (autoscroll) el.scrollTop = el.scrollHeight;
+}
+
+// Infer a severity level from a GramAddict log line for coloring.
+function logLevelForLine(line) {
+  if (/\|\s*(ERROR|CRITICAL)\b/.test(line) || /\bERROR\b/.test(line)) return "error";
+  if (/\|\s*WARNING\b/.test(line) || /\bWARNING\b/.test(line)) return "warn";
+  return "info";
 }
 
 function clearLog() {
   const el = $("unified-log");
   if (el) el.innerHTML = "";
+}
+
+const STORY_LIKES_LOG_MARKERS = [
+  "daily story likes",
+  "story likes |",
+  "story segment",
+  "has no new story",
+  "has no story",
+  "last story check",
+  "already checked today",
+  "already checked",
+  "story watch limit",
+  "accounts checked for stories",
+  "no new story to like",
+  "checked — no new story",
+  "checked — no story",
+  "session start",
+  "removed from list",
+  "added to story list",
+  "job complete",
+  "could not open profile",
+];
+
+function isStoryLikesLogLine(message) {
+  const lower = String(message || "").toLowerCase();
+  if (lower.includes("plugin_loader")) return false;
+  if (lower.includes("like new stories for a fixed list")) return false;
+  return STORY_LIKES_LOG_MARKERS.some((marker) => lower.includes(marker));
+}
+
+function storyLikesLogLevel(line) {
+  const lower = String(line || "").toLowerCase();
+  if (lower.includes("error") || lower.includes("failed")) return "error";
+  if (lower.includes("skip") || lower.includes("no new story") || lower.includes("limit")) {
+    return "warn";
+  }
+  if (lower.includes("liked")) return "success";
+  return "info";
+}
+
+function storyLikesLogRaw(message, level = "info") {
+  const el = $("story-likes-log");
+  if (!el) return;
+  const line = document.createElement("div");
+  line.className = `log-line log-${level}`;
+  line.textContent = message;
+  el.appendChild(line);
+}
+
+function storyLikesLogLive(message, level = "info") {
+  const el = $("story-likes-log");
+  if (!el) return;
+  const line = document.createElement("div");
+  line.className = `log-line log-${level}`;
+  line.textContent = message;
+  el.insertBefore(line, el.firstChild);
+  if (autoscroll) el.scrollTop = 0;
+}
+
+function clearStoryLikesLog() {
+  const el = $("story-likes-log");
+  if (el) el.innerHTML = "";
+}
+
+function accountHasStoryLikesEnabled(acct) {
+  return Boolean(acct?.story_likes_enabled);
+}
+
+function updateStoryLikesLogPanelVisibility(acct) {
+  const panel = $("story-likes-log-panel");
+  if (!panel) return;
+  const show = accountHasStoryLikesEnabled(acct);
+  panel.classList.toggle("hidden", !show);
 }
 
 function clearDebugTerminal() {
@@ -241,7 +346,16 @@ function escapeHtml(s) {
 
 function accountForDevice(serial) {
   if (!serial) return null;
-  return gaAccounts.find((a) => a.device === serial) || null;
+  const bySerial = gaAccounts.find((a) => a.device === serial);
+  if (bySerial) return bySerial;
+  // Fall back to the phone's stable hardware id so the @name sticks even when the
+  // ADB serial changes (e.g. wireless reconnect on a new IP:port).
+  const device = devices.find((d) => d.serial === serial);
+  const hardwareId = device?.hardware_id;
+  if (hardwareId) {
+    return gaAccounts.find((a) => a.device_id && a.device_id === hardwareId) || null;
+  }
+  return null;
 }
 
 function accountForActivePhone() {
@@ -254,6 +368,93 @@ function normalizeInstagramHandle(value) {
 
 const deviceAccountDrafts = {};
 let deviceAccountEditingSerial = null;
+
+// Per-account note editing state (Farm rows). Drafts survive the frequent
+// device-poll re-renders of the table so an in-progress note isn't wiped.
+const farmNoteDrafts = {};
+const farmNoteTimers = {};
+
+function deviceAccountNoteHtml(acct) {
+  if (!acct) return "";
+  const val = Object.prototype.hasOwnProperty.call(farmNoteDrafts, acct.id)
+    ? farmNoteDrafts[acct.id]
+    : acct.note || "";
+  const hasNote = !!(val && val.trim());
+  return `<input type="text" class="phones-account-note${hasNote ? " has-note" : ""}"
+      data-account-id="${escapeHtml(acct.id)}" value="${escapeHtml(val)}"
+      placeholder="Add note…" autocomplete="off" spellcheck="false"
+      aria-label="Note for ${escapeHtml(acct.username || acct.id)}">`;
+}
+
+function onFarmNoteInput(accountId, input) {
+  farmNoteDrafts[accountId] = input.value;
+  if (farmNoteTimers[accountId]) clearTimeout(farmNoteTimers[accountId]);
+  // Debounced autosave so notes persist even without leaving the field.
+  farmNoteTimers[accountId] = setTimeout(() => saveFarmNote(accountId, input), 1200);
+}
+
+async function saveFarmNote(accountId, input) {
+  if (farmNoteTimers[accountId]) {
+    clearTimeout(farmNoteTimers[accountId]);
+    delete farmNoteTimers[accountId];
+  }
+  const note = input ? input.value : farmNoteDrafts[accountId];
+  if (note == null) return;
+  const acct = gaAccounts.find((a) => a.id === accountId);
+  if (note === (acct ? acct.note || "" : "")) {
+    delete farmNoteDrafts[accountId];
+    return;
+  }
+  try {
+    const res = await fetch(
+      `/api/gramaddict/accounts/${encodeURIComponent(accountId)}/note`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note }),
+      }
+    );
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    if (acct) acct.note = data.note || "";
+    delete farmNoteDrafts[accountId];
+  } catch (err) {
+    log(`Could not save note: ${err.message}`, "error");
+  }
+}
+
+// Preserve which note input is focused (and caret position) across a full
+// table re-render so device polling doesn't interrupt note editing.
+function captureFarmNoteFocus() {
+  const el = document.activeElement;
+  if (el && el.classList && el.classList.contains("phones-account-note")) {
+    return {
+      accountId: el.dataset.accountId,
+      start: el.selectionStart,
+      end: el.selectionEnd,
+    };
+  }
+  return null;
+}
+
+function restoreFarmNoteFocus(info) {
+  if (!info || !info.accountId) return;
+  let el;
+  try {
+    el = document.querySelector(
+      `.phones-account-note[data-account-id="${CSS.escape(info.accountId)}"]`
+    );
+  } catch (e) {
+    el = null;
+  }
+  if (!el) return;
+  el.focus();
+  try {
+    el.setSelectionRange(info.start, info.end);
+  } catch (e) {
+    /* non-text input edge case */
+  }
+}
 
 function deviceAccountInputValue(serial, acct) {
   if (Object.prototype.hasOwnProperty.call(deviceAccountDrafts, serial)) {
@@ -288,8 +489,65 @@ function findDeviceRow(serial) {
   );
 }
 
+function sleepingTagHtml(nextAt) {
+  let title = "Sleeping between sessions";
+  if (nextAt) {
+    const d = new Date(nextAt);
+    if (!isNaN(d.getTime())) {
+      title = `Sleeping between sessions · next session ${d.toLocaleTimeString(
+        undefined,
+        { hour: "numeric", minute: "2-digit" }
+      )}`;
+    }
+  }
+  return ` <span class="phones-account-sleeping" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">💤</span>`;
+}
+
+function progressLimitsHtml(acct, acctRunning) {
+  if (!acctRunning || !acct?.progress) return "";
+  const p = acct.progress;
+  const part = (label, val, lim) => {
+    if (val == null && !lim) return null;
+    return `${label} ${val ?? 0}${lim ? `/${lim}` : ""}`;
+  };
+  const parts = [
+    part("Follows", p.follows, p.follows_limit),
+    part("Likes", p.likes, p.likes_limit),
+    part("Comments", p.comments, p.comments_limit),
+  ];
+  if (p.story_likes > 0) {
+    parts.push(part("Story likes", p.story_likes, p.story_likes_limit ?? p.watches_limit));
+  } else if (p.watched > 0) {
+    parts.push(part("Stories", p.watched, p.watches_limit));
+  }
+  if (
+    (p.daily_story_likes != null && p.daily_story_likes > 0) ||
+    p.current_job === "daily-story-likes"
+  ) {
+    parts.push(
+      part("Daily story likes", p.daily_story_likes ?? 0, p.daily_story_likes_limit)
+    );
+  }
+  const text = parts.filter(Boolean).join(" · ");
+  // 💤 goes at the end of the line (after Stories) when between sessions.
+  const sleeping = p.sleeping ? sleepingTagHtml(p.next_session_at) : "";
+  if (!text && !sleeping) return "";
+  return `<div class="phones-account-progress" title="Live session progress">${escapeHtml(text)}${sleeping}</div>`;
+}
+
 function deviceAccountCellHtml(serial, acct, acctRunning) {
-  const runningMark = acctRunning ? '<span class="phones-account-running" title="Bot running">●</span>' : "";
+  const runningMark = acctRunning ? '<span class="phones-account-running" title="Bot active">●</span>' : "";
+  const errorMark = hasRecentError(acct?.last_error)
+    ? `<button type="button" class="phones-account-error" data-error="${escapeHtml(JSON.stringify(acct.last_error))}"
+         onclick='showErrorPopover(event)' title="Recent error — click for details" aria-label="Recent error">&#9432;</button>`
+    : "";
+  const disabledMark = acct?.disabled
+    ? `<span class="phones-account-disabled" title="${escapeHtml(
+        acct.disabled_reason ? `Disabled — ${acct.disabled_reason}` : "Disabled"
+      )}">Disabled</span>`
+    : "";
+  const marks = `${runningMark}${errorMark}${disabledMark}`;
+  const progress = progressLimitsHtml(acct, acctRunning);
   if (deviceAccountEditingSerial === serial) {
     const handleValue = escapeHtml(deviceAccountInputValue(serial, acct));
     return `
@@ -306,14 +564,34 @@ function deviceAccountCellHtml(serial, acct, acctRunning) {
     return `
       <div class="phones-account-wrap">
         <button type="button" class="phones-account-set">Set account</button>
-        ${runningMark}
+        ${marks}
       </div>`;
   }
   return `
-    <div class="phones-account-wrap">
-      <button type="button" class="phones-account-display" title="@${escapeHtml(handle)}">@${escapeHtml(handle)}</button>
-      ${runningMark}
+    <div class="phones-account-cell">
+      <div class="phones-account-wrap">
+        <button type="button" class="phones-account-display" title="Click to edit · double-click to open @${escapeHtml(handle)} on Instagram">@${escapeHtml(handle)}</button>
+        ${marks}
+      </div>
+      ${progress}
+      ${deviceAccountNoteHtml(acct)}
     </div>`;
+}
+
+function deviceLinkedAccountIds() {
+  // Accounts that have an @ assigned to a phone (device serial or stable hardware
+  // id), whether or not that phone is currently connected.
+  const ids = new Set();
+  for (const acct of gaAccounts) {
+    if (acct && (acct.device || acct.device_id)) ids.add(acct.id);
+  }
+  return ids;
+}
+
+function openInstagramProfile(handle) {
+  const clean = normalizeInstagramHandle(handle);
+  if (!clean) return;
+  window.open(`https://www.instagram.com/${encodeURIComponent(clean)}/`, "_blank", "noopener");
 }
 
 function bindDeviceAccountCell(row, serial) {
@@ -323,10 +601,44 @@ function bindDeviceAccountCell(row, serial) {
     e.stopPropagation();
     startDeviceAccountEdit(serial);
   });
-  displayBtn?.addEventListener("click", (e) => {
-    e.stopPropagation();
-    startDeviceAccountEdit(serial);
-  });
+  if (displayBtn) {
+    // Single click edits the handle; double click opens the IG profile.
+    // Delay the single-click edit so a double click can cancel it.
+    let clickTimer = null;
+    displayBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (clickTimer) return;
+      clickTimer = setTimeout(() => {
+        clickTimer = null;
+        startDeviceAccountEdit(serial);
+      }, 250);
+    });
+    displayBtn.addEventListener("dblclick", (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      if (clickTimer) {
+        clearTimeout(clickTimer);
+        clickTimer = null;
+      }
+      const acct = accountForDevice(serial);
+      openInstagramProfile(acct?.username || acct?.id || "");
+    });
+  }
+  const noteInput = row.querySelector(".phones-account-note");
+  if (noteInput) {
+    const accountId = noteInput.dataset.accountId;
+    // Stop clicks from bubbling to the row (which would select the device).
+    noteInput.addEventListener("click", (e) => e.stopPropagation());
+    noteInput.addEventListener("input", () => onFarmNoteInput(accountId, noteInput));
+    noteInput.addEventListener("blur", () => saveFarmNote(accountId, noteInput));
+    noteInput.addEventListener("keydown", (e) => {
+      e.stopPropagation();
+      if (e.key === "Enter") {
+        e.preventDefault();
+        noteInput.blur();
+      }
+    });
+  }
   const accountInput = row.querySelector(".phones-account-input");
   if (accountInput) {
     accountInput.addEventListener("input", () => onDeviceAccountInput(serial, accountInput));
@@ -756,56 +1068,190 @@ function ensureActivePhone() {
 }
 
 function populateCtxPhoneSelect() {
-  const select = $("ctx-phone-select");
   const text = $("ctx-phone");
-  if (!select || !text) return;
+  if (!text) return;
 
+  // Phone is always shown as static text — the active phone is chosen by
+  // clicking a row in the devices table, so no dropdown is needed here.
+  text.classList.remove("hidden");
   const candidates = getContextPhoneCandidates();
-  if (candidates.length <= 1) {
+  const device =
+    candidates.find((d) => d.serial === activeSerial) || candidates[0];
+  text.textContent = device ? deviceOptionLabel(device) : "None selected";
+}
+
+function populateCtxAccountSelect() {
+  const select = $("ctx-account-select");
+  const text = $("ctx-account");
+  if (!select || !text) return;
+  const acct = currentAccount();
+  if (gaAccounts.length <= 1) {
     select.classList.add("hidden");
     text.classList.remove("hidden");
-    const device = candidates[0];
-    text.textContent = device ? deviceOptionLabel(device) : "None selected";
+    text.textContent = acct ? `@${acct.username || acct.id}` : "None";
     return;
   }
-
   select.classList.remove("hidden");
   text.classList.add("hidden");
-  select.innerHTML = candidates
+  select.innerHTML = gaAccounts
     .map(
-      (d) =>
-        `<option value="${escapeHtml(d.serial)}">${escapeHtml(deviceOptionLabel(d))}</option>`
+      (a) =>
+        `<option value="${escapeHtml(a.id)}">@${escapeHtml(a.username || a.id)}${
+          a.running ? " (running)" : ""
+        }</option>`
     )
     .join("");
-  const value =
-    activeSerial && candidates.some((d) => d.serial === activeSerial)
-      ? activeSerial
-      : candidates[0].serial;
-  select.value = value;
-  if (value !== activeSerial) {
-    selectActiveDevice(value, { quiet: true });
+  if (acct) select.value = acct.id;
+}
+
+function onCtxAccountChange() {
+  const select = $("ctx-account-select");
+  if (select?.value) selectActiveAccount(select.value);
+}
+
+function selectActiveAccount(accountId) {
+  const acct = gaAccounts.find((a) => a.id === accountId);
+  if (!acct) return;
+  gaCurrentAccountId = accountId;
+  localStorage.setItem("gaAccountId", accountId);
+  // Keep the active phone in sync with this account's linked device when it's
+  // connected, so the context strip and currentAccount() agree.
+  const dev = devices.find(
+    (d) =>
+      d.serial === acct.device ||
+      (acct.device_id && d.hardware_id && d.hardware_id === acct.device_id)
+  );
+  if (dev) {
+    activeSerial = dev.serial;
+    if (!selectedSerials.has(dev.serial)) selectedSerials.add(dev.serial);
+  } else {
+    activeSerial = "";
+  }
+  persistDeviceSelection();
+  const pageSelect = $("ga-account-select");
+  if (pageSelect) pageSelect.value = accountId;
+  setMainTab("account");
+  onGaAccountChange();
+  renderDevices();
+}
+
+/* ── Status tags (active/inactive + recent error) ── */
+
+function hasRecentError(lastError) {
+  return !!(lastError && lastError.recent);
+}
+
+// Build the up-to-2 status tags: an Active/Inactive pill, plus a "Recent error"
+// pill with an ⓘ button when the account logged an error recently.
+function statusTagsHtml(running, lastError, disabled, disabledReason) {
+  const stateTag = running
+    ? '<span class="status-tag active">Active</span>'
+    : '<span class="status-tag inactive">Inactive</span>';
+  const disabledTag = disabled
+    ? `<span class="status-tag disabled" title="${escapeHtml(
+        disabledReason ? `Disabled — ${disabledReason}` : "Disabled"
+      )}">Disabled${disabledReason ? ` — ${escapeHtml(disabledReason)}` : ""}</span>`
+    : "";
+  if (!hasRecentError(lastError)) return stateTag + disabledTag;
+  const payload = escapeHtml(JSON.stringify(lastError));
+  return (
+    stateTag +
+    disabledTag +
+    `<button type="button" class="status-tag error" data-error="${payload}"
+       onclick='showErrorPopover(event)' title="Recent error — click for details">
+       Recent error
+       <span class="status-info" aria-hidden="true">&#9432;</span>
+     </button>`
+  );
+}
+
+let errorPopoverEl = null;
+
+function closeErrorPopover() {
+  if (errorPopoverEl) {
+    errorPopoverEl.remove();
+    errorPopoverEl = null;
+    document.removeEventListener("click", onErrorPopoverOutside, true);
+    document.removeEventListener("keydown", onErrorPopoverKey, true);
   }
 }
 
-function onCtxPhoneChange() {
-  const select = $("ctx-phone-select");
-  if (select?.value) selectActiveDevice(select.value, { quiet: true });
+function onErrorPopoverOutside(e) {
+  if (errorPopoverEl && !errorPopoverEl.contains(e.target) && !e.target.closest(".status-tag.error, .phones-account-error")) {
+    closeErrorPopover();
+  }
+}
+
+function onErrorPopoverKey(e) {
+  if (e.key === "Escape") closeErrorPopover();
+}
+
+function showErrorPopover(event) {
+  event.stopPropagation();
+  const btn = event.currentTarget;
+  let err;
+  try {
+    err = JSON.parse(btn.dataset.error || "{}");
+  } catch (_) {
+    err = {};
+  }
+  const wasOpenForThis = errorPopoverEl && errorPopoverEl.dataset.anchor === (btn.dataset.error || "");
+  closeErrorPopover();
+  if (wasOpenForThis) return; // toggle off if clicking the same trigger
+
+  errorPopoverEl = document.createElement("div");
+  errorPopoverEl.className = "error-popover";
+  errorPopoverEl.dataset.anchor = btn.dataset.error || "";
+  errorPopoverEl.innerHTML = `
+    <div class="error-popover-head">
+      <span class="error-popover-level">${escapeHtml(err.level || "ERROR")}</span>
+      ${err.at ? `<span class="error-popover-time">${escapeHtml(err.at)}</span>` : ""}
+      <button type="button" class="error-popover-close" onclick="closeErrorPopover()" aria-label="Close">&times;</button>
+    </div>
+    <div class="error-popover-body">${escapeHtml(err.message || "No details available.")}</div>`;
+  document.body.appendChild(errorPopoverEl);
+
+  const rect = btn.getBoundingClientRect();
+  const pop = errorPopoverEl.getBoundingClientRect();
+  let left = rect.left;
+  if (left + pop.width > window.innerWidth - 12) {
+    left = Math.max(12, window.innerWidth - pop.width - 12);
+  }
+  errorPopoverEl.style.top = `${rect.bottom + 6 + window.scrollY}px`;
+  errorPopoverEl.style.left = `${left + window.scrollX}px`;
+
+  setTimeout(() => {
+    document.addEventListener("click", onErrorPopoverOutside, true);
+    document.addEventListener("keydown", onErrorPopoverKey, true);
+  }, 0);
 }
 
 function updateContextStrip() {
   ensureActivePhone();
   populateCtxPhoneSelect();
-  const accountEl = $("ctx-account");
+  populateCtxAccountSelect();
   const statusEl = $("ctx-status");
   const acct = currentAccount();
   const running = !!(acct?.running || gaAccountRunning);
 
-  if (accountEl) {
-    accountEl.textContent = acct ? `@${acct.username || acct.id}` : "None";
-  }
   if (statusEl) {
-    statusEl.textContent = running ? "Running" : "Idle";
-    statusEl.className = "context-status " + (running ? "running" : "idle");
+    statusEl.className = "context-status-group";
+    statusEl.innerHTML = statusTagsHtml(
+      running,
+      acct?.last_error,
+      acct?.disabled,
+      acct?.disabled_reason
+    );
+  }
+
+  const disableBtn = $("btn-ctx-disable");
+  if (disableBtn) {
+    disableBtn.disabled = !acct;
+    disableBtn.textContent = acct?.disabled ? "Enable" : "Disable";
+    disableBtn.classList.toggle("btn-kill", !acct?.disabled);
+    disableBtn.title = acct?.disabled
+      ? "Re-enable this account so it can run again"
+      : "Pause this account (stops it and blocks runs until re-enabled)";
   }
 
   const canRun = !!acct && (!!activeSerial || acct.device || gaCurrentAccountId);
@@ -926,6 +1372,7 @@ function updateCounts() {
 function renderDevices() {
   const tbody = $("farm-grid");
   if (!tbody) return;
+  const noteFocus = captureFarmNoteFocus();
   tbody.innerHTML = "";
 
   if (devices.length === 0) {
@@ -982,6 +1429,10 @@ function renderDevices() {
   }
   updateCounts();
   updateFarmBatchButtons();
+  restoreFarmNoteFocus(noteFocus);
+  // Device links can change (e.g. serial healed on reconnect), which affects
+  // which @names are offered in the pool "Add account" list.
+  if ((gaBrandPools.pools || []).length) renderBrandPools();
 }
 
 function onDeviceCheckChange(serial, checked) {
@@ -1021,7 +1472,15 @@ function selectActiveDevice(serial, opts = {}) {
   updateInspectorHeader();
   updateToolsView();
   populateCtxPhoneSelect();
-  if (!quiet) log(`Selected ${shortSerial(serial)}`);
+  if (!quiet) {
+    // Clicking a phone shows only that device's account bot log.
+    if (changed) {
+      renderActiveBotLog();
+    } else {
+      log(`Selected ${shortSerial(serial)}`);
+      renderActiveStoryLikesLog();
+    }
+  }
   if (changed && currentMainTab === "tools" && !opts.skipWeditor) {
     connectWeditor(serial);
   }
@@ -1242,6 +1701,261 @@ async function dumpSelected() {
   }
 }
 
+let accountStatusPollTimer = null;
+
+// Per-account bot log buffers so parallel runs don't interleave in one console.
+// The console shows only the active device's account log.
+const botLogsByAccount = {};
+const storyLikesLogsByAccount = {};
+const BOT_LOG_BUFFER_MAX = 600;
+
+function activeAccountId() {
+  if (!activeSerial) return null;
+  return accountForDevice(activeSerial)?.id || null;
+}
+
+/* ── Per-account notes ── */
+let accountNoteSaveTimer = null;
+let accountNoteLastSaved = "";
+
+function setAccountNoteStatus(text) {
+  const el = $("account-notes-status");
+  if (el) el.textContent = text || "";
+}
+
+function renderAccountNote(note) {
+  const wrap = $("account-notes");
+  const input = $("account-notes-input");
+  if (!wrap || !input) return;
+  wrap.classList.remove("hidden");
+  input.value = note || "";
+  accountNoteLastSaved = note || "";
+  setAccountNoteStatus("");
+}
+
+function onAccountNoteInput() {
+  setAccountNoteStatus("Editing…");
+  if (accountNoteSaveTimer) clearTimeout(accountNoteSaveTimer);
+  // Debounced autosave so notes persist even without leaving the field.
+  accountNoteSaveTimer = setTimeout(saveAccountNote, 1200);
+}
+
+async function saveAccountNote() {
+  const input = $("account-notes-input");
+  if (!input || !gaCurrentAccountId) return;
+  if (accountNoteSaveTimer) {
+    clearTimeout(accountNoteSaveTimer);
+    accountNoteSaveTimer = null;
+  }
+  const note = input.value;
+  if (note === accountNoteLastSaved) return;
+  const accountId = gaCurrentAccountId;
+  setAccountNoteStatus("Saving…");
+  try {
+    const res = await fetch(
+      `/api/gramaddict/accounts/${encodeURIComponent(accountId)}/note`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note }),
+      }
+    );
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    accountNoteLastSaved = data.note || "";
+    const acct = gaAccounts.find((a) => a.id === accountId);
+    if (acct) acct.note = accountNoteLastSaved;
+    setAccountNoteStatus("Saved");
+    setTimeout(() => {
+      if ($("account-notes-status")?.textContent === "Saved") {
+        setAccountNoteStatus("");
+      }
+    }, 1500);
+  } catch (err) {
+    setAccountNoteStatus("Save failed");
+    log(`Could not save note: ${err.message}`, "error");
+  }
+}
+
+function pushBotLog(accountId, message) {
+  if (!accountId) return;
+  const buf = botLogsByAccount[accountId] || (botLogsByAccount[accountId] = []);
+  buf.push(message);
+  if (buf.length > BOT_LOG_BUFFER_MAX) buf.splice(0, buf.length - BOT_LOG_BUFFER_MAX);
+  if (isStoryLikesLogLine(message)) {
+    pushStoryLikesLog(accountId, message);
+  }
+}
+
+function pushStoryLikesLog(accountId, message) {
+  if (!accountId || !message) return;
+  const clean = String(message).replace(/^Story likes \| /i, "").trim();
+  const buf =
+    storyLikesLogsByAccount[accountId] ||
+    (storyLikesLogsByAccount[accountId] = []);
+  buf.push(clean);
+  if (buf.length > BOT_LOG_BUFFER_MAX) buf.splice(0, buf.length - BOT_LOG_BUFFER_MAX);
+}
+
+// Re-render the console with the active account's bot log. Called on device
+// switch so clicking a phone shows that account's log — loading the persisted
+// on-disk history (current + previous runs) so you can see why a run ended,
+// then live lines continue to append via the websocket.
+let botLogRenderToken = 0;
+async function renderActiveBotLog() {
+  const el = $("unified-log");
+  if (!el) return;
+  el.innerHTML = "";
+  const id = activeAccountId();
+  const acct = id ? gaAccounts.find((a) => a.id === id) : null;
+  const label = acct ? `@${acct.username || acct.id}` : null;
+  if (!id) {
+    log("Select a phone to view its bot log", "info");
+    return;
+  }
+  const token = ++botLogRenderToken;
+  log(`— ${label} log — loading history…`, "info");
+  try {
+    const res = await fetch(
+      `/api/gramaddict/accounts/${encodeURIComponent(id)}/log?lines=800`
+    );
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    // A newer selection happened while we were fetching — abandon this render.
+    if (token !== botLogRenderToken || activeAccountId() !== id) return;
+    el.innerHTML = "";
+    const lines = data.lines || [];
+    if (!lines.length) {
+      logRaw("(no log history on disk yet)", "info");
+    } else {
+      for (const line of lines.slice().reverse()) {
+        logRaw(line, logLevelForLine(line));
+      }
+    }
+    logRaw(`— ${label} log ${data.running ? "(running)" : "(stopped)"} —`, "info");
+    logRaw("— live updates above —", "info");
+    for (const line of botLogsByAccount[id] || []) {
+      log(`[bot] ${line}`, "info");
+    }
+  } catch (err) {
+    if (token !== botLogRenderToken) return;
+    el.innerHTML = "";
+    log(`— ${label} log —`, "info");
+    log(`Could not load log history: ${err.message}`, "error");
+    for (const line of botLogsByAccount[id] || []) {
+      log(`[bot] ${line}`, "info");
+    }
+  }
+  await renderActiveStoryLikesLog({ accountId: id, label, token });
+}
+
+let storyLikesLogRenderToken = 0;
+async function renderActiveStoryLikesLog(opts = {}) {
+  const panel = $("story-likes-log-panel");
+  const el = $("story-likes-log");
+  if (!panel || !el) return;
+  const id = opts.accountId || activeAccountId();
+  const acct = id ? gaAccounts.find((a) => a.id === id) : null;
+  updateStoryLikesLogPanelVisibility(acct);
+  if (!id || !accountHasStoryLikesEnabled(acct)) {
+    el.innerHTML = "";
+    return;
+  }
+  const label = opts.label || `@${acct?.username || acct?.id || id}`;
+  const token = opts.token ?? ++storyLikesLogRenderToken;
+  if (!opts.token) storyLikesLogRenderToken = token;
+  el.innerHTML = "";
+  storyLikesLogRaw(`— ${label} story likes — loading…`, "info");
+  try {
+    const res = await fetch(
+      `/api/gramaddict/accounts/${encodeURIComponent(id)}/story-likes-log?lines=400`
+    );
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    if (token !== storyLikesLogRenderToken || activeAccountId() !== id) return;
+    el.innerHTML = "";
+    const lines = data.lines || [];
+    if (!lines.length) {
+      storyLikesLogRaw("(no story likes history yet)", "info");
+    } else {
+      for (const line of lines.slice().reverse()) {
+        storyLikesLogRaw(line, storyLikesLogLevel(line));
+      }
+    }
+    storyLikesLogRaw(
+      `— ${label} story likes ${data.running ? "(running)" : "(stopped)"} —`,
+      "info"
+    );
+    storyLikesLogRaw("— live updates above —", "info");
+    for (const line of storyLikesLogsByAccount[id] || []) {
+      storyLikesLogLive(line, storyLikesLogLevel(line));
+    }
+  } catch (err) {
+    if (token !== storyLikesLogRenderToken) return;
+    el.innerHTML = "";
+    storyLikesLogRaw(`Could not load story likes log: ${err.message}`, "error");
+    for (const line of storyLikesLogsByAccount[id] || []) {
+      storyLikesLogLive(line, storyLikesLogLevel(line));
+    }
+  }
+}
+
+// Poll lightweight running + recent-error + live-progress status and merge it
+// into the loaded accounts, refreshing the status tags/counters WITHOUT
+// reloading the config form (which would interrupt editing). Runs every 5s so
+// live like/follow/comment counters feel responsive.
+async function pollAccountStatus() {
+  if (!gaAccounts.length) return;
+  try {
+    const res = await fetch("/api/gramaddict/accounts-status");
+    if (!res.ok) return;
+    const statuses = await res.json();
+    const byId = new Map(statuses.map((s) => [s.id, s]));
+    let changed = false;
+    for (const acct of gaAccounts) {
+      const s = byId.get(acct.id);
+      if (!s) continue;
+      const prev = JSON.stringify([
+        acct.running,
+        acct.last_error || null,
+        acct.progress || null,
+        acct.disabled || false,
+        acct.disabled_reason || "",
+        acct.story_likes_enabled || false,
+      ]);
+      acct.running = s.running;
+      acct.last_error = s.last_error || null;
+      acct.progress = s.progress || null;
+      acct.disabled = s.disabled || false;
+      acct.disabled_reason = s.disabled_reason || "";
+      acct.story_likes_enabled = Boolean(s.story_likes_enabled);
+      if (
+        JSON.stringify([
+          acct.running,
+          acct.last_error || null,
+          acct.progress || null,
+          acct.disabled || false,
+          acct.disabled_reason || "",
+          acct.story_likes_enabled || false,
+        ]) !== prev
+      ) {
+        changed = true;
+      }
+    }
+    if (changed) {
+      updateContextStrip();
+      renderDevices();
+    }
+  } catch (_) {
+    /* transient network error — try again next tick */
+  }
+}
+
+function startAccountStatusPolling() {
+  if (accountStatusPollTimer) clearInterval(accountStatusPollTimer);
+  accountStatusPollTimer = setInterval(pollAccountStatus, 5000);
+}
+
 function connectWebSocket() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -1260,8 +1974,21 @@ function connectWebSocket() {
         populateGaDeviceSelects();
       } else if (msg.type === "error") {
         log(msg.message, "error");
+      } else if (msg.type === "accounts_changed") {
+        loadGaAccounts()
+          .then(() => renderDevices())
+          .catch(() => {});
       } else if (msg.type === "bot_log") {
-        log(`[bot] ${msg.message}`, "info");
+        // Buffer per account; only show the active device's account log so
+        // parallel runs don't combine into one stream.
+        pushBotLog(msg.account, msg.message);
+        if (msg.account && msg.account === activeAccountId()) {
+          log(`[bot] ${msg.message}`, "info");
+          if (isStoryLikesLogLine(msg.message)) {
+            const storyLine = msg.message.replace(/^Story likes \| /i, "").trim();
+            storyLikesLogLive(storyLine, storyLikesLogLevel(storyLine));
+          }
+        }
       } else if (msg.type === "debug_log") {
         if (!activeSerial || !msg.serial || msg.serial === activeSerial) {
           appendDebugTerminalLine(msg.message);
@@ -2649,7 +3376,16 @@ function renderFormField(field, attr = "data-ga-key") {
   }
   if (field.type === "lines") {
     const linesPlaceholder = placeholder || "One per line";
-    return `<div class="field"><label>${label}</label><textarea ${attr}="${key}" class="ga-input" rows="2" placeholder="${linesPlaceholder}"></textarea></div>`;
+    return `<div class="field">
+      <div class="lines-field-header">
+        <label>${label}</label>
+        <div class="lines-import-wrap">
+          <button type="button" class="btn-ghost btn-sm lines-import-btn" data-lines-import="${key}" aria-haspopup="true" aria-expanded="false" title="Load names from a .txt list saved on this account">Import .txt</button>
+          <div class="lines-import-menu" data-lines-menu="${key}" role="menu" hidden></div>
+        </div>
+      </div>
+      <textarea ${attr}="${key}" class="ga-input" rows="2" placeholder="${linesPlaceholder}"></textarea>
+    </div>`;
   }
   if (field.type === "textarea") {
     return `<div class="field field-span-2"><label>${label}</label><textarea ${attr}="${key}" class="ga-input" rows="4" spellcheck="true" placeholder="${placeholder}"></textarea></div>`;
@@ -2890,6 +3626,10 @@ function renderPostReelMediaList(files) {
     <li class="post-reel-media-item">
       <span class="post-reel-media-item-name">${i + 1}. ${escapeHtml(f.name)}</span>
       <span class="post-reel-media-item-meta">${escapeHtml(f.size_label || "")}</span>
+      <button type="button" class="btn-ghost btn-sm post-reel-media-distribute" data-post-reel-distribute="${escapeHtml(f.name)}" title="Copy this video to accounts on the same template">
+        <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg>
+        Copy to connected
+      </button>
       <button type="button" class="btn-ghost btn-sm" data-post-reel-delete="${escapeHtml(f.name)}" title="Remove">×</button>
     </li>`
       )
@@ -2900,7 +3640,61 @@ function renderPostReelMediaList(files) {
         deletePostReelMedia(btn.getAttribute("data-post-reel-delete"));
       });
     });
+    list.querySelectorAll("[data-post-reel-distribute]").forEach((btn) => {
+      btn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        distributePostReelMedia(btn.getAttribute("data-post-reel-distribute"), btn);
+      });
+    });
   });
+}
+
+async function distributePostReelMedia(filename, btn) {
+  if (!gaCurrentAccountId || !filename) return;
+  if (
+    !window.confirm(
+      `Copy “${filename}” to every account connected to this account's template?\n\n` +
+        `It's added alongside their existing videos. Autopost-locked accounts are skipped.`
+    )
+  ) {
+    return;
+  }
+  const origHtml = btn?.innerHTML;
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `<span class="ga-spinner ga-spinner-inline"></span> Copying…`;
+  }
+  try {
+    const res = await fetch(
+      `/api/gramaddict/accounts/${encodeURIComponent(gaCurrentAccountId)}/post-reel/media/distribute`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename }),
+      }
+    );
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Copy failed");
+    const okCount = (data.copied || []).length;
+    const existing = (data.skipped_existing || []).length;
+    const locked = (data.skipped_locked || []).length;
+    const errCount = (data.errors || []).length;
+    const parts = [`Copied to ${okCount} account${okCount === 1 ? "" : "s"}`];
+    if (existing) parts.push(`${existing} already had it`);
+    if (locked) parts.push(`${locked} locked skipped`);
+    if (errCount) parts.push(`${errCount} failed`);
+    const msg = parts.join(" · ");
+    setPostReelUploadStatus(msg, errCount ? "error" : "success");
+    log(`Distribute “${filename}”: ${msg}`);
+    (data.errors || []).forEach((e) => log(`  ${e.account_id}: ${e.error}`, "error"));
+  } catch (err) {
+    setPostReelUploadStatus(err.message || "Copy failed", "error");
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = origHtml || "Copy to connected";
+    }
+  }
 }
 
 function postReelsCountValue() {
@@ -2983,16 +3777,38 @@ async function uploadPostReelFiles(fileList) {
 
 async function deletePostReelMedia(filename) {
   if (!gaCurrentAccountId || !filename) return;
-  if (!window.confirm(`Remove ${filename} from post_media?`)) return;
+  if (
+    !window.confirm(
+      `Remove “${filename}” from this account AND every account connected to its template?\n\n` +
+        `Autopost-locked accounts are skipped.`
+    )
+  ) {
+    return;
+  }
   try {
     const res = await fetch(
-      `/api/gramaddict/accounts/${encodeURIComponent(gaCurrentAccountId)}/post-reel/media/${encodeURIComponent(filename)}`,
-      { method: "DELETE" }
+      `/api/gramaddict/accounts/${encodeURIComponent(gaCurrentAccountId)}/post-reel/media/delete-connected`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename }),
+      }
     );
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || "Delete failed");
     renderPostReelMediaList(data.files || []);
-    setPostReelUploadStatus(`Removed ${filename}`, "success");
+    const connectedDeleted = (data.deleted || []).length;
+    const locked = (data.skipped_locked || []).length;
+    const errCount = (data.errors || []).length;
+    const parts = [`Removed ${filename}`];
+    if (connectedDeleted)
+      parts.push(`${connectedDeleted} connected account${connectedDeleted === 1 ? "" : "s"}`);
+    if (locked) parts.push(`${locked} locked skipped`);
+    if (errCount) parts.push(`${errCount} failed`);
+    const msg = parts.join(" · ");
+    setPostReelUploadStatus(msg, errCount ? "error" : "success");
+    log(`Delete “${filename}”: ${msg}`);
+    (data.errors || []).forEach((e) => log(`  ${e.account_id}: ${e.error}`, "error"));
   } catch (err) {
     setPostReelUploadStatus(err.message || "Delete failed", "error");
   }
@@ -3268,19 +4084,104 @@ function collectGaForm() {
 let sessionEstimateTimer = null;
 let lastSessionEstimate = null;
 
+function formatActionRange(actions, key) {
+  const a = actions?.[key];
+  if (!a || a.high == null) return "";
+  const label = (a.label || key).toLowerCase();
+  return a.low === a.high ? `${a.low} ${label}` : `${a.low}–${a.high} ${label}`;
+}
+
+function formatProfileEstimate(data) {
+  const p = data?.expected_profiles;
+  const s = data?.successful_interactions;
+  const vision = data?.ai_vision || {};
+  const visionOn = !!vision.screens_profiles;
+  const passPct = Math.round((vision.pass_ratio || 0.4) * 100);
+  const actions = Object.fromEntries(
+    (data?.action_estimates || []).map((a) => [a.action, a])
+  );
+  const outcomeParts = [
+    formatActionRange(actions, "likes"),
+    formatActionRange(actions, "follows"),
+    formatActionRange(actions, "comments"),
+    formatActionRange(actions, "story_likes"),
+  ].filter(Boolean);
+  const outcomeLine = outcomeParts.length
+    ? `Then up to ${outcomeParts.join(", ")} (each has its own cap)`
+    : "";
+
+  if (!p) {
+    return {
+      label: "Profile visits",
+      value: "—",
+      detail: "",
+      title: "",
+      summaryPart: "",
+    };
+  }
+
+  if (visionOn && s) {
+    const detailParts = [
+      `~${s.low}–${s.high} pass AI vision (~${passPct}%) — only these are interacted with`,
+      outcomeLine,
+    ].filter(Boolean);
+    return {
+      label: "Profile visits",
+      value: `${p.low}–${p.high} opened`,
+      detail: detailParts.join(". "),
+      title:
+        `The bot opens ${p.low}–${p.high} Instagram profiles. AI vision screenshots each ` +
+        `one — only ~${passPct}% pass (~${s.low}–${s.high}). Those passing profiles ` +
+        `enter your interaction pool (likes, follows, comments). Each action has its ` +
+        `own limit — e.g. comments are capped separately and only a few profiles get ` +
+        `commented on, not every pass.`,
+      summaryPart: `${p.low}–${p.high} opened · ~${s.low}–${s.high} pass vision`,
+    };
+  }
+
+  const detailParts = [
+    "Instagram accounts opened to like, follow, or comment",
+    outcomeLine,
+  ].filter(Boolean);
+  return {
+    label: "Profile visits",
+    value: `${p.low}–${p.high}`,
+    detail: detailParts.join(". "),
+    title:
+      `Estimated ${p.low}–${p.high} Instagram profile visits before session limits ` +
+      `stop the run. Each visit may like, follow, or comment depending on your ` +
+      `percentages and per-action caps.`,
+    summaryPart: `${p.low}–${p.high} profile visits`,
+  };
+}
+
 function fillEstimatePanel(root, data) {
   if (!root || !data) return;
   const dur = root.querySelector('[data-est="duration"]');
   const binding = root.querySelector('[data-est="binding"]');
+  const profilesLabel = root.querySelector('[data-est="profiles-label"]');
   const profiles = root.querySelector('[data-est="profiles"]');
+  const profilesDetail = root.querySelector('[data-est="profiles-detail"]');
+  const profilesStat = root.querySelector('[data-est="profiles-stat"]');
   const schedule = root.querySelector('[data-est="schedule"]');
   const warnBadge = root.querySelector('[data-est="warn-badge"]');
+  const summary = root.querySelector('[data-est="summary"]');
+  const profileEst = formatProfileEstimate(data);
+  if (summary) {
+    const parts = [];
+    if (data.session_minutes?.label) parts.push(data.session_minutes.label);
+    if (profileEst.summaryPart) parts.push(profileEst.summaryPart);
+    summary.textContent = parts.join(" · ");
+  }
   if (dur) dur.textContent = data.session_minutes?.label || "—";
   if (binding) binding.textContent = data.binding_limit || "—";
-  if (profiles) {
-    const p = data.expected_profiles;
-    profiles.textContent = p ? `${p.low}–${p.high}` : "—";
+  if (profilesLabel) profilesLabel.textContent = profileEst.label;
+  if (profiles) profiles.textContent = profileEst.value;
+  if (profilesDetail) {
+    profilesDetail.textContent = profileEst.detail || "";
+    profilesDetail.classList.toggle("hidden", !profileEst.detail);
   }
+  if (profilesStat) profilesStat.title = profileEst.title || "";
   if (schedule) {
     schedule.textContent = data.schedule?.label || "";
     schedule.classList.toggle("hidden", !data.schedule?.label);
@@ -3298,6 +4199,61 @@ function fillEstimatePanel(root, data) {
   }
 }
 
+function applySessionEstimateCollapse() {
+  const panel = $("account-session-estimate");
+  const toggle = $("btn-estimate-toggle");
+  if (!panel) return;
+  // Collapsed by default; only expanded if the user chose to expand it.
+  const collapsed = localStorage.getItem("sessionEstimateOpen") !== "1";
+  panel.classList.toggle("is-collapsed", collapsed);
+  toggle?.setAttribute("aria-expanded", collapsed ? "false" : "true");
+}
+
+function toggleSessionEstimate() {
+  const panel = $("account-session-estimate");
+  if (!panel) return;
+  const nowCollapsed = !panel.classList.contains("is-collapsed");
+  localStorage.setItem("sessionEstimateOpen", nowCollapsed ? "0" : "1");
+  applySessionEstimateCollapse();
+}
+
+function escapeHtml(text) {
+  return String(text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function renderSessionOutcomes(estimate) {
+  const el = document.querySelector('[data-est="outcomes"]');
+  if (!el) return;
+  const actions = estimate?.action_estimates || [];
+  const total = estimate?.total_actions;
+  if (!actions.length && !total?.high) {
+    el.classList.add("hidden");
+    el.innerHTML = "";
+    return;
+  }
+  const parts = actions.map(
+    (a) =>
+      `<span class="account-estimate-outcome-item"><strong>${a.low}–${a.high} ${escapeHtml(a.label)}</strong></span>`
+  );
+  const totalHtml = total?.high
+    ? `<span class="account-estimate-outcome-total"><strong>Total: ~${total.low}–${total.high} actions per session</strong></span>`
+    : "";
+  el.innerHTML = `<div class="account-estimate-outcomes-line"><strong>Expected outcomes per session:</strong> ${parts.join(", ")}.${totalHtml ? ` ${totalHtml}.` : ""}</div>`;
+  el.classList.remove("hidden");
+}
+
+function markExplanationStale() {
+  // AI explanation removed; nothing to invalidate.
+}
+
+function syncSessionExplanationForAccount() {
+  // AI explanation removed; deterministic outcomes line is rendered separately.
+}
+
 function renderSessionEstimate(estimate) {
   if (estimate) lastSessionEstimate = estimate;
   const data = estimate || lastSessionEstimate;
@@ -3306,7 +4262,10 @@ function renderSessionEstimate(estimate) {
   const show = !!(data && gaCurrentAccountId);
   panel.classList.toggle("hidden", !show);
   if (!show) return;
+  applySessionEstimateCollapse();
   fillEstimatePanel(panel, data);
+  renderSessionOutcomes(data);
+  syncSessionExplanationForAccount();
 }
 
 function collectPostReelSettings() {
@@ -3322,6 +4281,7 @@ async function refreshSessionEstimate() {
       body: JSON.stringify({
         config: collectGaForm(),
         post_reel: collectPostReelSettings(),
+        follow_vision: collectFields("data-fv-key"),
       }),
     });
     if (!res.ok) return;
@@ -3333,6 +4293,7 @@ async function refreshSessionEstimate() {
 }
 
 function scheduleSessionEstimateRefresh() {
+  markExplanationStale();
   if (sessionEstimateTimer) clearTimeout(sessionEstimateTimer);
   sessionEstimateTimer = setTimeout(() => refreshSessionEstimate(), 450);
 }
@@ -3393,10 +4354,9 @@ async function loadAccountFiles() {
 }
 
 let gaSettingTemplates = [];
+let tmplApplyId = null; // template id currently in the apply step
 
 async function loadSettingsTemplateSources() {
-  const select = $("template-load-source");
-  if (!select) return;
   try {
     const res = await fetch("/api/gramaddict/templates");
     if (!res.ok) throw new Error(await res.text());
@@ -3405,27 +4365,114 @@ async function loadSettingsTemplateSources() {
   } catch (_) {
     gaSettingTemplates = [];
   }
-  const parts = ['<option value="">Load from…</option>'];
-  const others = gaAccounts.filter((a) => a.id !== gaCurrentAccountId);
-  if (others.length) {
-    parts.push('<optgroup label="Other accounts">');
-    others.forEach((a) => {
-      parts.push(
-        `<option value="account:${escapeHtml(a.id)}">${escapeHtml(a.username || a.id)}</option>`
-      );
-    });
-    parts.push("</optgroup>");
+  renderAppliedTemplateStatus();
+  if (!$("template-manager-overlay")?.classList.contains("hidden")) {
+    // Refresh whichever view is open.
+    if (tmplApplyId && gaSettingTemplates.some((t) => t.id === tmplApplyId)) {
+      renderTemplateApplyView();
+    } else {
+      showTemplateView("library");
+      renderTemplateLibrary();
+    }
   }
-  if (gaSettingTemplates.length) {
-    parts.push('<optgroup label="Saved templates">');
-    gaSettingTemplates.forEach((t) => {
-      parts.push(
-        `<option value="template:${escapeHtml(t.id)}">${escapeHtml(t.name || t.id)}</option>`
-      );
-    });
-    parts.push("</optgroup>");
+}
+
+function appliedTemplateForAccount(accountId) {
+  for (const t of gaSettingTemplates) {
+    const member = (t.applied_to || []).find((m) => m.account_id === accountId);
+    if (member) return { template: t, member };
   }
-  select.innerHTML = parts.join("");
+  return null;
+}
+
+/* Compact status line on the account page. */
+function renderAppliedTemplateStatus() {
+  const el = $("account-applied-template");
+  if (!el) return;
+  const applied = gaCurrentAccountId
+    ? appliedTemplateForAccount(gaCurrentAccountId)
+    : null;
+  if (!applied) {
+    el.className = "account-template-status-value is-none";
+    el.textContent = "No template applied";
+    return;
+  }
+  const { template, member } = applied;
+  const modified = !!member.modified;
+  el.className = "account-template-status-value";
+  el.innerHTML = `${escapeHtml(template.name || template.id)} <span class="tmpl-pill ${
+    modified ? "tmpl-pill-warn" : "tmpl-pill-ok"
+  }">${modified ? "Modified" : "In sync"}</span>`;
+}
+
+function fmtTemplateDate(iso) {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  return d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+/* ── Modal shell ── */
+
+function openTemplateManager() {
+  const overlay = $("template-manager-overlay");
+  if (!overlay) return;
+  overlay.classList.remove("hidden");
+  document.body.classList.add("modal-open");
+  hideNewTemplateForm();
+  showTemplateView("library");
+  loadSettingsTemplateSources();
+  renderTemplateLibrary();
+}
+
+function closeTemplateManager() {
+  const overlay = $("template-manager-overlay");
+  if (!overlay) return;
+  overlay.classList.add("hidden");
+  document.body.classList.remove("modal-open");
+  tmplApplyId = null;
+}
+
+function showTemplateView(view) {
+  const lib = $("tmpl-view-library");
+  const apply = $("tmpl-view-apply");
+  const back = $("btn-tmpl-back");
+  const title = $("template-manager-title");
+  const subtitle = $("template-manager-subtitle");
+  const isApply = view === "apply";
+  lib?.classList.toggle("hidden", isApply);
+  apply?.classList.toggle("hidden", !isApply);
+  back?.classList.toggle("hidden", !isApply);
+  if (!isApply) {
+    tmplApplyId = null;
+    if (title) title.textContent = "Templates";
+    if (subtitle)
+      subtitle.textContent =
+        "Save an account’s settings once, then apply them to any account. Each account always keeps its own username and phone link.";
+  }
+}
+
+/* ── Save-as-template inline form ── */
+
+function showNewTemplateForm() {
+  if (!gaCurrentAccountId) {
+    setGaStatus("Open an account first", "error");
+    return;
+  }
+  $("tmpl-new-form")?.classList.remove("hidden");
+  $("btn-tmpl-new")?.classList.add("hidden");
+  const input = $("template-save-name");
+  if (input) {
+    const acct = gaAccounts.find((a) => a.id === gaCurrentAccountId);
+    input.value = "";
+    input.placeholder = `Template from @${acct?.username || gaCurrentAccountId}…`;
+    input.focus();
+  }
+}
+
+function hideNewTemplateForm() {
+  $("tmpl-new-form")?.classList.add("hidden");
+  $("btn-tmpl-new")?.classList.remove("hidden");
 }
 
 async function saveCurrentAsTemplate() {
@@ -3433,6 +4480,7 @@ async function saveCurrentAsTemplate() {
   const name = ($("template-save-name")?.value || "").trim();
   if (!name) {
     setGaStatus("Enter a template name", "error");
+    $("template-save-name")?.focus();
     return;
   }
   try {
@@ -3446,7 +4494,7 @@ async function saveCurrentAsTemplate() {
     );
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "Save template failed");
-    $("template-save-name").value = "";
+    hideNewTemplateForm();
     setGaStatus(`Saved template “${data.name || data.id}”`, "success");
     log(`Saved settings template: ${data.id}`);
     await loadSettingsTemplateSources();
@@ -3455,46 +4503,291 @@ async function saveCurrentAsTemplate() {
   }
 }
 
-async function applySettingsFromSource() {
-  if (!gaCurrentAccountId) return;
-  const raw = $("template-load-source")?.value || "";
-  const includeLists = !!$("template-include-lists")?.checked;
-  if (!raw || !raw.includes(":")) {
-    setGaStatus("Choose an account or template to load from", "error");
+/* ── Library view (browse) ── */
+
+function renderTemplateLibrary() {
+  const list = $("template-manager-list");
+  if (!list) return;
+  if (!gaSettingTemplates.length) {
+    list.innerHTML = `
+      <div class="tmpl-empty">
+        <div class="tmpl-empty-icon" aria-hidden="true">
+          <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></svg>
+        </div>
+        <h3 class="tmpl-empty-title">No templates yet</h3>
+        <p class="tmpl-empty-text">Set up one account exactly how you like it, then use <strong>Save current account as template</strong> above. You can apply it to any other account in one click.</p>
+      </div>`;
     return;
   }
-  const [sourceType, ...rest] = raw.split(":");
-  const sourceId = rest.join(":");
-  const label =
-    $("template-load-source")?.selectedOptions?.[0]?.textContent?.trim() || sourceId;
+  list.innerHTML = gaSettingTemplates
+    .map((t) => {
+      const applied = t.applied_to || [];
+      const usedBy = applied.length
+        ? `Used by ${applied.length} account${applied.length === 1 ? "" : "s"}`
+        : "Not applied yet";
+      const meta = [
+        t.source_account ? `From @${escapeHtml(t.source_account)}` : "",
+        fmtTemplateDate(t.created_at) ? `Created ${fmtTemplateDate(t.created_at)}` : "",
+        `${t.file_count || 0} files`,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      const chips = applied.length
+        ? `<div class="tmpl-card-chips">${applied
+            .map(
+              (m) =>
+                `<span class="tmpl-chip${m.modified ? " is-modified" : ""}" title="${
+                  m.modified ? "Edited since applied" : "In sync with template"
+                }">@${escapeHtml(m.username)}</span>`
+            )
+            .join("")}</div>`
+        : "";
+      return `
+      <div class="tmpl-card" data-template-id="${escapeHtml(t.id)}">
+        <div class="tmpl-card-info">
+          <h3 class="tmpl-card-name">${escapeHtml(t.name || t.id)}</h3>
+          <span class="tmpl-card-meta">${escapeHtml(meta)} · ${usedBy}</span>
+          ${chips}
+        </div>
+        <div class="tmpl-card-actions">
+          ${
+            applied.length
+              ? `<button type="button" class="btn-ghost btn-sm btn-primary-outline tmpl-sync-btn" title="Overwrite every connected account with this template" onclick="syncTemplateToConnected('${escapeHtml(t.id)}', this)">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/></svg>
+                  Apply to ${applied.length} connected
+                </button>`
+              : ""
+          }
+          <button type="button" class="btn-ghost btn-sm" onclick="startTemplateApply('${escapeHtml(t.id)}')">Apply…</button>
+          <button type="button" class="tmpl-icon-btn" title="Rename" aria-label="Rename template" onclick="renameTemplate('${escapeHtml(t.id)}')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+          </button>
+          <button type="button" class="tmpl-icon-btn tmpl-icon-btn-danger" title="Delete" aria-label="Delete template" onclick="deleteTemplate('${escapeHtml(t.id)}')">
+            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+          </button>
+        </div>
+      </div>`;
+    })
+    .join("");
+}
+
+/* ── Apply view (choose accounts) ── */
+
+function startTemplateApply(templateId) {
+  const tmpl = gaSettingTemplates.find((t) => t.id === templateId);
+  if (!tmpl) return;
+  tmplApplyId = templateId;
+  showTemplateView("apply");
+  renderTemplateApplyView();
+}
+
+function renderTemplateApplyView() {
+  const container = $("tmpl-view-apply");
+  const tmpl = gaSettingTemplates.find((t) => t.id === tmplApplyId);
+  if (!container || !tmpl) return;
+  const title = $("template-manager-title");
+  const subtitle = $("template-manager-subtitle");
+  if (title) title.textContent = `Apply “${tmpl.name || tmpl.id}”`;
+  if (subtitle)
+    subtitle.textContent =
+      "Choose which accounts get this template. It replaces their settings — usernames and phone links stay.";
+  const appliedIds = new Set((tmpl.applied_to || []).map((m) => m.account_id));
+  const rows = gaAccounts.length
+    ? gaAccounts
+        .map((a) => {
+          const isCurrent = a.id === gaCurrentAccountId;
+          const already = appliedIds.has(a.id);
+          return `
+        <label class="tmpl-target">
+          <input type="checkbox" class="ui-checkbox tmpl-target-cb" value="${escapeHtml(a.id)}"${
+            isCurrent ? " checked" : ""
+          } onchange="updateTemplateApplyCount()">
+          <span class="tmpl-target-name">@${escapeHtml(a.username || a.id)}</span>
+          ${isCurrent ? '<span class="tmpl-target-tag">current</span>' : ""}
+          ${already ? '<span class="tmpl-target-tag tmpl-target-tag-muted">using this</span>' : ""}
+        </label>`;
+        })
+        .join("")
+    : '<p class="tmpl-empty-text">No accounts available.</p>';
+  container.innerHTML = `
+    <div class="tmpl-apply-controls">
+      <span class="tmpl-apply-controls-label">Apply to accounts</span>
+      <div class="tmpl-apply-controls-actions">
+        <button type="button" class="link-btn" onclick="toggleAllTemplateTargets(true)">Select all</button>
+        <button type="button" class="link-btn" onclick="toggleAllTemplateTargets(false)">Clear</button>
+      </div>
+    </div>
+    <div class="tmpl-target-list">${rows}</div>
+    <label class="ga-check tmpl-apply-lists">
+      <input type="checkbox" class="ui-checkbox" id="tmpl-apply-include-lists" checked>
+      <span class="ga-check-label">Also copy username lists (whitelist, blacklist, story-like list, etc.)</span>
+    </label>
+    <div class="tmpl-apply-foot">
+      <button type="button" class="btn-ghost btn-sm" onclick="showTemplateView('library')">Cancel</button>
+      <button type="button" class="btn-ghost btn-sm btn-primary-outline" id="tmpl-apply-confirm" onclick="confirmTemplateApply()">Apply to 1 account</button>
+    </div>`;
+  updateTemplateApplyCount();
+}
+
+function toggleAllTemplateTargets(checked) {
+  document
+    .querySelectorAll("#tmpl-view-apply .tmpl-target-cb")
+    .forEach((el) => (el.checked = checked));
+  updateTemplateApplyCount();
+}
+
+function selectedApplyTargets() {
+  return [...document.querySelectorAll("#tmpl-view-apply .tmpl-target-cb:checked")].map(
+    (el) => el.value
+  );
+}
+
+function updateTemplateApplyCount() {
+  const btn = $("tmpl-apply-confirm");
+  if (!btn) return;
+  const n = selectedApplyTargets().length;
+  btn.disabled = n === 0;
+  btn.textContent = n === 1 ? "Apply to 1 account" : `Apply to ${n} accounts`;
+}
+
+async function confirmTemplateApply() {
+  const templateId = tmplApplyId;
+  const tmpl = gaSettingTemplates.find((t) => t.id === templateId);
+  if (!tmpl) return;
+  const accountIds = selectedApplyTargets();
+  if (!accountIds.length) return;
+  const includeLists = !!$("tmpl-apply-include-lists")?.checked;
+  const btn = $("tmpl-apply-confirm");
+  const origLabel = btn?.textContent;
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `<span class="ga-spinner ga-spinner-inline"></span> Applying…`;
+  }
+  try {
+    if (accountIds.includes(gaCurrentAccountId)) await flushAutosave();
+    const res = await fetch(
+      `/api/gramaddict/templates/${encodeURIComponent(templateId)}/apply`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ account_ids: accountIds, include_lists: includeLists }),
+      }
+    );
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Apply failed");
+    const okCount = (data.applied || []).length;
+    const errCount = (data.errors || []).length;
+    let msg = `Applied “${tmpl.name || templateId}” to ${okCount} account${okCount === 1 ? "" : "s"}`;
+    if (errCount) msg += ` (${errCount} failed)`;
+    setGaStatus(msg, errCount ? "error" : "success");
+    log(msg);
+    (data.errors || []).forEach((e) => log(`  ${e.account_id}: ${e.error}`, "error"));
+    if (accountIds.includes(gaCurrentAccountId)) await onGaAccountChange();
+    await loadSettingsTemplateSources();
+    showTemplateView("library");
+    renderTemplateLibrary();
+  } catch (err) {
+    setGaStatus(err.message, "error");
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = origLabel || "Apply";
+    }
+  }
+}
+
+/* One-click: push a template to every account already connected to it. */
+async function syncTemplateToConnected(templateId, btn) {
+  const tmpl = gaSettingTemplates.find((t) => t.id === templateId);
+  if (!tmpl) return;
+  const members = tmpl.applied_to || [];
+  const accountIds = members.map((m) => m.account_id).filter(Boolean);
+  if (!accountIds.length) {
+    setGaStatus("No connected accounts to apply to", "error");
+    return;
+  }
+  const names = members.map((m) => `@${m.username || m.account_id}`).join(", ");
+  const plural = accountIds.length === 1 ? "" : "s";
   if (
     !confirm(
-      `Replace settings on this account with “${label}”?\n\nUsername and phone link stay the same.${
-        includeLists ? "\nUsername lists will be copied too." : ""
-      }`
+      `Apply “${tmpl.name || templateId}” to ${accountIds.length} connected account${plural}?\n\n` +
+        `${names}\n\n` +
+        `This overwrites their settings AND username lists (whitelist, blacklist, story-like list, etc.). ` +
+        `Each account keeps its own username and phone link.`
     )
   ) {
     return;
   }
+  const origLabel = btn?.innerHTML;
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = `<span class="ga-spinner ga-spinner-inline"></span> Applying…`;
+  }
   try {
-    await flushAutosave();
+    if (accountIds.includes(gaCurrentAccountId)) await flushAutosave();
     const res = await fetch(
-      `/api/gramaddict/accounts/${encodeURIComponent(gaCurrentAccountId)}/apply-settings`,
+      `/api/gramaddict/templates/${encodeURIComponent(templateId)}/apply`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          source_type: sourceType,
-          source_id: sourceId,
-          include_lists: includeLists,
-        }),
+        body: JSON.stringify({ account_ids: accountIds, include_lists: true }),
       }
     );
     const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || "Apply settings failed");
-    setGaStatus(`Loaded settings from ${label}`, "success");
-    log(`Applied settings from ${sourceType}:${sourceId} → ${gaCurrentAccountId}`);
-    await onGaAccountChange();
+    if (!res.ok) throw new Error(data.detail || "Apply failed");
+    const okCount = (data.applied || []).length;
+    const errCount = (data.errors || []).length;
+    let msg = `Applied “${tmpl.name || templateId}” to ${okCount} connected account${
+      okCount === 1 ? "" : "s"
+    }`;
+    if (errCount) msg += ` (${errCount} failed)`;
+    setGaStatus(msg, errCount ? "error" : "success");
+    log(msg);
+    (data.errors || []).forEach((e) => log(`  ${e.account_id}: ${e.error}`, "error"));
+    if (accountIds.includes(gaCurrentAccountId)) await onGaAccountChange();
+    await loadSettingsTemplateSources();
+    renderTemplateLibrary();
+  } catch (err) {
+    setGaStatus(err.message, "error");
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = origLabel || "Apply to connected";
+    }
+  }
+}
+
+async function renameTemplate(templateId) {
+  const tmpl = gaSettingTemplates.find((t) => t.id === templateId);
+  const next = prompt("Rename template", tmpl?.name || templateId);
+  if (next === null) return;
+  const name = next.trim();
+  if (!name || name === tmpl?.name) return;
+  try {
+    const res = await fetch(`/api/gramaddict/templates/${encodeURIComponent(templateId)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Rename failed");
+    setGaStatus(`Renamed template to “${data.name}”`, "success");
+    await loadSettingsTemplateSources();
+  } catch (err) {
+    setGaStatus(err.message, "error");
+  }
+}
+
+async function deleteTemplate(templateId) {
+  const tmpl = gaSettingTemplates.find((t) => t.id === templateId);
+  if (!confirm(`Delete template “${tmpl?.name || templateId}”?\n\nAccounts already using it keep their settings — they just stop tracking this template.`)) {
+    return;
+  }
+  try {
+    const res = await fetch(`/api/gramaddict/templates/${encodeURIComponent(templateId)}`, {
+      method: "DELETE",
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Delete failed");
+    setGaStatus("Template deleted", "success");
     await loadSettingsTemplateSources();
   } catch (err) {
     setGaStatus(err.message, "error");
@@ -3502,15 +4795,53 @@ async function applySettingsFromSource() {
 }
 
 function bindSettingsTemplates() {
+  $("btn-manage-templates")?.addEventListener("click", openTemplateManager);
+  $("btn-close-template-manager")?.addEventListener("click", closeTemplateManager);
+  $("btn-tmpl-back")?.addEventListener("click", () => {
+    showTemplateView("library");
+    renderTemplateLibrary();
+  });
+  $("btn-tmpl-new")?.addEventListener("click", showNewTemplateForm);
+  $("btn-tmpl-new-cancel")?.addEventListener("click", hideNewTemplateForm);
   $("btn-save-template")?.addEventListener("click", saveCurrentAsTemplate);
-  $("btn-apply-settings")?.addEventListener("click", applySettingsFromSource);
+  $("template-save-name")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      saveCurrentAsTemplate();
+    }
+  });
+  $("template-manager-overlay")?.addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closeTemplateManager();
+  });
+  document.addEventListener("keydown", (e) => {
+    if (
+      e.key === "Escape" &&
+      !$("template-manager-overlay")?.classList.contains("hidden")
+    ) {
+      closeTemplateManager();
+    }
+  });
+}
+
+// Accounts whose username should always be pinned to the top, in this order.
+const PINNED_ACCOUNT_USERNAMES = ["yourlovefilms", "615films"];
+
+function sortAccountsPinned(accounts) {
+  const rank = (a) => {
+    const name = String(a.username || a.id || "").trim().toLowerCase();
+    const idx = PINNED_ACCOUNT_USERNAMES.indexOf(name);
+    return idx === -1 ? PINNED_ACCOUNT_USERNAMES.length : idx;
+  };
+  // Stable sort: pinned accounts move to the top in the configured order;
+  // everything else keeps the order the API returned.
+  return [...accounts].sort((a, b) => rank(a) - rank(b));
 }
 
 async function loadGaAccounts() {
   try {
     const res = await fetch("/api/gramaddict/accounts");
     if (!res.ok) throw new Error(await res.text());
-    gaAccounts = await res.json();
+    gaAccounts = sortAccountsPinned(await res.json());
     const select = $("ga-account-select");
     const fields = $("ga-config-fields");
     const empty = $("ga-no-accounts");
@@ -3520,6 +4851,8 @@ async function loadGaAccounts() {
       fields?.classList.add("hidden");
       empty?.classList.remove("hidden");
       $("account-session-estimate")?.classList.add("hidden");
+      $("account-templates-bar")?.classList.add("hidden");
+      $("account-notes")?.classList.add("hidden");
       gaCurrentAccountId = "";
       syncRunButtons(false);
       $("btn-delete-account")?.setAttribute("disabled", "disabled");
@@ -3528,6 +4861,7 @@ async function loadGaAccounts() {
     }
     empty?.classList.add("hidden");
     fields?.classList.remove("hidden");
+    $("account-templates-bar")?.classList.remove("hidden");
     $("btn-delete-account")?.removeAttribute("disabled");
     select.innerHTML = gaAccounts
       .map((a) => `<option value="${a.id}">${a.username || a.id}${a.running ? " (running)" : ""}</option>`)
@@ -3564,6 +4898,7 @@ async function onGaAccountChange() {
     ]);
     if (!acctRes.ok) throw new Error(await acctRes.text());
     const data = await acctRes.json();
+    renderAccountNote(data.note || "");
     fillGaForm(data.form || {});
     gaAccountAutopostLocked = !!data.autopost_locked;
     applyPostReelsLock();
@@ -3599,6 +4934,7 @@ async function onGaAccountChange() {
     renderSessionEstimate(data.estimate);
     setGaStatus("");
     updateContextStrip();
+    await loadSettingsTemplateSources();
     if (currentMainTab === "tools") await loadAdvFiles();
   } catch (err) {
     setGaStatus(err.message, "error");
@@ -3917,6 +5253,101 @@ function onAccountFieldInput(event) {
   }
 }
 
+function applyImportedLines(key, text, sourceLabel) {
+  const textarea = document.querySelector(`textarea[data-ga-key="${key}"]`);
+  if (!textarea) return;
+  const imported = text
+    .split(/[\r\n,]+/)
+    .map((s) => s.trim().replace(/^@/, ""))
+    .filter(Boolean);
+  if (!imported.length) {
+    log(`${sourceLabel} had no usernames/tags to import`, "error");
+    return;
+  }
+  const existing = textarea.value
+    .split(/[\r\n,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const merged = [];
+  const seen = new Set();
+  for (const item of [...existing, ...imported]) {
+    const dedupeKey = item.toLowerCase();
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+    merged.push(item);
+  }
+  const added = merged.length - existing.length;
+  textarea.value = merged.join("\n");
+  textarea.dispatchEvent(new Event("input", { bubbles: true }));
+  log(
+    `Imported ${added} new entr${added === 1 ? "y" : "ies"} from ${sourceLabel}` +
+      (added < imported.length ? ` (${imported.length - added} already present)` : "")
+  );
+}
+
+function closeAllLinesImportMenus(exceptKey) {
+  document.querySelectorAll("[data-lines-menu]").forEach((menu) => {
+    if (exceptKey && menu.getAttribute("data-lines-menu") === exceptKey) return;
+    menu.hidden = true;
+    const btn = document.querySelector(`[data-lines-import="${menu.getAttribute("data-lines-menu")}"]`);
+    btn?.setAttribute("aria-expanded", "false");
+  });
+}
+
+async function toggleLinesImportMenu(key, btn) {
+  const menu = document.querySelector(`[data-lines-menu="${key}"]`);
+  if (!menu) return;
+  if (!menu.hidden) {
+    closeAllLinesImportMenus();
+    return;
+  }
+  closeAllLinesImportMenus(key);
+  if (!gaCurrentAccountId) {
+    log("Select an account before importing a list", "error");
+    return;
+  }
+  menu.innerHTML = `<div class="lines-import-empty">Loading…</div>`;
+  menu.hidden = false;
+  btn.setAttribute("aria-expanded", "true");
+  let files = [];
+  try {
+    const res = await fetch(
+      `/api/gramaddict/accounts/${encodeURIComponent(gaCurrentAccountId)}/files`
+    );
+    if (!res.ok) throw new Error("Failed to load files");
+    files = (await res.json()).filter((f) => f.name.toLowerCase().endsWith(".txt"));
+  } catch (err) {
+    menu.innerHTML = `<div class="lines-import-empty">${escapeHtml(err.message)}</div>`;
+    return;
+  }
+  if (!files.length) {
+    menu.innerHTML = `<div class="lines-import-empty">No .txt lists on this account</div>`;
+    return;
+  }
+  menu.innerHTML = files
+    .map(
+      (f) =>
+        `<button type="button" class="lines-import-item" role="menuitem" data-lines-menu-key="${escapeHtml(
+          key
+        )}" data-lines-menu-file="${escapeHtml(f.name)}">${escapeHtml(f.name)}</button>`
+    )
+    .join("");
+}
+
+async function applyLinesFromAccountFile(key, filename) {
+  if (!gaCurrentAccountId) return;
+  try {
+    const res = await fetch(
+      `/api/gramaddict/accounts/${encodeURIComponent(gaCurrentAccountId)}/files/${encodeURIComponent(filename)}`
+    );
+    if (!res.ok) throw new Error(`Could not read ${filename}`);
+    const data = await res.json();
+    applyImportedLines(key, data.content || "", filename);
+  } catch (err) {
+    log(err.message, "error");
+  }
+}
+
 function bindAccountAutosave() {
   const root = $("ga-config-fields");
   if (root) {
@@ -3934,7 +5365,28 @@ function bindAccountAutosave() {
       if (input.files?.length) uploadPostReelFiles(input.files);
       input.value = "";
     });
+    root.addEventListener("click", (event) => {
+      const importBtn = event.target.closest("[data-lines-import]");
+      if (importBtn) {
+        toggleLinesImportMenu(importBtn.getAttribute("data-lines-import"), importBtn);
+        return;
+      }
+      const item = event.target.closest("[data-lines-menu-file]");
+      if (item) {
+        applyLinesFromAccountFile(
+          item.getAttribute("data-lines-menu-key"),
+          item.getAttribute("data-lines-menu-file")
+        );
+        closeAllLinesImportMenus();
+        return;
+      }
+      if (!event.target.closest("[data-lines-menu]")) closeAllLinesImportMenus();
+    });
   }
+  document.addEventListener("click", (event) => {
+    if (event.target.closest(".lines-import-wrap")) return;
+    closeAllLinesImportMenus();
+  });
   const adv = $("adv-file-content");
   if (adv) {
     adv.addEventListener("input", () => {
@@ -3982,6 +5434,10 @@ function resolveFarmBatchTargets() {
       skipped.push({ serial, reason: "no linked account" });
       continue;
     }
+    if (account.disabled) {
+      skipped.push({ serial, reason: "disabled" });
+      continue;
+    }
     if (account.running) {
       skipped.push({ serial, reason: "already running" });
       continue;
@@ -4025,7 +5481,62 @@ async function waitForBotDone(accountId) {
   return false;
 }
 
+function clearStoryLikesLogBuffer(accountId) {
+  if (!accountId) return;
+  delete storyLikesLogsByAccount[accountId];
+  if (accountId === activeAccountId()) {
+    renderActiveStoryLikesLog();
+  }
+}
+
+function clearBotLog(accountId) {
+  if (!accountId) return;
+  delete botLogsByAccount[accountId];
+  if (accountId === activeAccountId()) renderActiveBotLog();
+}
+
+async function toggleAccountDisabled() {
+  const acct = currentAccount();
+  if (!acct) return;
+  const label = `@${acct.username || acct.id}`;
+  let reason = acct.disabled_reason || "";
+  if (!acct.disabled) {
+    reason = prompt(`Disable ${label}? Optional reason (e.g. selfie verification):`, "");
+    if (reason === null) return; // cancelled
+  }
+  try {
+    const res = await fetch(
+      `/api/gramaddict/accounts/${encodeURIComponent(acct.id)}/disable`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ disabled: !acct.disabled, reason }),
+      }
+    );
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Failed to update account");
+    acct.disabled = data.disabled;
+    acct.disabled_reason = data.disabled_reason || "";
+    if (data.disabled) acct.running = false;
+    log(
+      data.disabled
+        ? `Disabled ${label}${reason ? ` — ${reason}` : ""}`
+        : `Enabled ${label}`,
+      "success"
+    );
+    await loadGaAccounts();
+    updateContextStrip();
+    renderDevices();
+  } catch (err) {
+    log(err.message, "error");
+    setGaStatus(err.message, "error");
+  }
+}
+
 async function startBotForFarmTarget(serial, accountId) {
+  // Fresh run → drop the previous run's buffered log for this account.
+  clearBotLog(accountId);
+  clearStoryLikesLogBuffer(accountId);
   const res = await fetch(`/api/gramaddict/accounts/${encodeURIComponent(accountId)}/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -4108,30 +5619,57 @@ async function runFarmBatch() {
 }
 
 async function stopFarmBatch() {
+  // Hard kill: cancel any in-flight batch and fire every stop at once with
+  // force=true so all selected bots die instantly (parallel, no grace period).
   farmBatchCancel = true;
-  const serials = farmBatchSerials();
+  farmBatchRunning = false;
+
+  const targets = [];
+  const seen = new Set();
+  for (const serial of farmBatchSerials()) {
+    const account = accountForDevice(serial);
+    if (!account?.running || seen.has(account.id)) continue;
+    seen.add(account.id);
+    targets.push(account);
+    account.running = false; // optimistic: reflect the kill immediately
+  }
+
+  if (!targets.length) {
+    updateFarmBatchButtons();
+    updateContextStrip();
+    renderDevices();
+    return;
+  }
+
+  // Instant visual feedback before the network round-trips resolve.
+  renderDevices();
+  updateContextStrip();
+  log(`Killing ${targets.length} bot(s)…`, "info");
+
+  const results = await Promise.allSettled(
+    targets.map((account) =>
+      fetch(`/api/gramaddict/accounts/${encodeURIComponent(account.id)}/stop?force=true`, {
+        method: "POST",
+      }).then(async (res) => {
+        const data = await res.json();
+        if (!res.ok || !data.stopped) throw new Error(data.detail || data.message || "Stop failed");
+        return account.username || account.id;
+      })
+    )
+  );
+
   const stopped = [];
   const errors = [];
-  for (const serial of serials) {
-    const account = accountForDevice(serial);
-    if (!account?.running) continue;
-    try {
-      const res = await fetch(`/api/gramaddict/accounts/${encodeURIComponent(account.id)}/stop`, {
-        method: "POST",
-      });
-      const data = await res.json();
-      if (!res.ok || !data.stopped) throw new Error(data.detail || data.message || "Stop failed");
-      stopped.push(account.username || account.id);
-    } catch (err) {
-      errors.push(`${account.username || account.id}: ${err.message}`);
-    }
-  }
+  results.forEach((r, i) => {
+    if (r.status === "fulfilled") stopped.push(r.value);
+    else errors.push(`${targets[i].username || targets[i].id}: ${r.reason?.message || r.reason}`);
+  });
+
   if (stopped.length) log(`Stopped: ${stopped.map((n) => `@${n}`).join(", ")}`, "success");
   if (errors.length) log(errors.join("; "), "error");
   if (stopped.length || errors.length) {
     setGaStatus(stopped.length ? `Stopped ${stopped.length} bot(s)` : errors[0], stopped.length ? "success" : "error");
   }
-  farmBatchRunning = false;
   await loadGaAccounts();
   renderDevices();
   updateContextStrip();
@@ -4156,6 +5694,8 @@ async function runGramAddict() {
   }
   try {
     await saveAllBeforeRun();
+    clearBotLog(accountId);
+    clearStoryLikesLogBuffer(accountId);
     const res = await fetch(`/api/gramaddict/accounts/${encodeURIComponent(accountId)}/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -4267,12 +5807,64 @@ async function saveAdvFile(opts = {}) {
 /* ── Brand pools ── */
 
 let gaBrandPools = { pools: [], unassigned: [] };
+let gaPoolMedia = {};
 
 async function loadBrandPools() {
   const res = await fetch("/api/brand-pools");
   if (!res.ok) throw new Error("Failed to load brand pools");
   gaBrandPools = await res.json();
+  await Promise.allSettled(
+    (gaBrandPools.pools || []).map((pool) => refreshPoolMedia(pool.id, false))
+  );
   renderBrandPools();
+}
+
+async function refreshPoolMedia(poolId, rerender = true) {
+  try {
+    const res = await fetch(`/api/brand-pools/${encodeURIComponent(poolId)}/media`);
+    if (!res.ok) return;
+    gaPoolMedia[poolId] = await res.json();
+  } catch (_) {
+    /* transient — keep whatever we had */
+  }
+  if (rerender) renderBrandPools();
+}
+
+function poolMediaSectionHtml(pool) {
+  const media = gaPoolMedia[pool.id] || { files: [], member_total: (pool.accounts || []).length };
+  const total = media.member_total ?? (pool.accounts || []).length;
+  const files = media.files || [];
+  const rows = files
+    .map((f) => {
+      const reach =
+        f.member_count >= total
+          ? `<span class="pool-video-reach all">on all ${total}</span>`
+          : `<span class="pool-video-reach partial" title="Only ${f.member_count} of ${total} accounts have this video">on ${f.member_count}/${total}</span>`;
+      return `
+        <div class="pool-video-row">
+          <span class="pool-video-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+          <span class="pool-video-size">${escapeHtml(f.size_label || "")}</span>
+          ${reach}
+          <button type="button" class="brand-pool-chip-remove" title="Delete from all accounts in this pool"
+            onclick="deletePoolMedia('${escapeHtml(pool.id)}', '${escapeHtml(f.name)}')">×</button>
+        </div>`;
+    })
+    .join("");
+  const disabled = total ? "" : "disabled";
+  return `
+    <div class="brand-pool-media">
+      <div class="brand-pool-media-head">
+        <span class="brand-pool-media-title">Videos</span>
+        <button type="button" class="btn-ghost btn-sm" ${disabled}
+          onclick="document.getElementById('pool-video-input-${escapeHtml(pool.id)}').click()"
+          title="Upload video(s) to every account in this pool">Upload video</button>
+        <input type="file" id="pool-video-input-${escapeHtml(pool.id)}" accept="video/*" multiple
+          class="pool-video-input" onchange="uploadPoolMedia('${escapeHtml(pool.id)}', this)">
+      </div>
+      <div class="pool-video-list">${
+        rows || '<p class="brand-pool-empty-members">No shared videos yet. Upload one to send it to all accounts in this pool.</p>'
+      }</div>
+    </div>`;
 }
 
 function renderBrandPools() {
@@ -4295,29 +5887,116 @@ function renderBrandPools() {
           </span>`
         )
         .join("");
-      const options = (gaBrandPools.unassigned || [])
+      const onDevice = deviceLinkedAccountIds();
+      const available = (gaBrandPools.unassigned || []).filter((acct) =>
+        onDevice.has(acct.account_id)
+      );
+      const options = available
         .map(
-          (acct) =>
-            `<option value="${escapeHtml(acct.account_id)}">@${escapeHtml(acct.username || acct.account_id)}</option>`
+          (acct) => `
+          <label class="brand-pool-add-option">
+            <input type="checkbox" class="ui-checkbox" value="${escapeHtml(acct.account_id)}">
+            <span>@${escapeHtml(acct.username || acct.account_id)}</span>
+          </label>`
         )
         .join("");
+      const addList = available.length
+        ? `<div class="brand-pool-add-list" data-pool-add-list="${escapeHtml(pool.id)}">${options}</div>`
+        : `<p class="brand-pool-empty-members">No available accounts to add.</p>`;
+      const postingDisabled = pool.posting_enabled === false;
       return `
         <div class="brand-pool-card" data-pool-id="${escapeHtml(pool.id)}">
           <div class="brand-pool-card-head">
             <h3>${escapeHtml(pool.name)}</h3>
             <span class="brand-pool-meta">${pool.interacted_count || 0} people in shared history</span>
           </div>
+          <label class="brand-pool-posting-toggle ${postingDisabled ? "is-off" : ""}"
+            title="When on, the post-reels job is skipped for every account in this pool (no 'upload reels' errors).">
+            <input type="checkbox" class="ui-checkbox" ${postingDisabled ? "checked" : ""}
+              onchange="togglePoolPosting('${escapeHtml(pool.id)}', this.checked)">
+            <span>Disable reel posting for this pool</span>
+          </label>
           <div class="brand-pool-members">${members || '<span class="brand-pool-empty-members">No accounts assigned</span>'}</div>
-          <div class="brand-pool-add-row">
-            <select class="ga-input brand-pool-add-select" data-pool-add="${escapeHtml(pool.id)}">
-              <option value="">Add account…</option>
-              ${options}
-            </select>
-            <button type="button" class="btn-ghost btn-sm" onclick="addToBrandPool('${escapeHtml(pool.id)}')">Add</button>
-          </div>
+          ${addList}
+          ${
+            available.length
+              ? `<div class="brand-pool-add-row">
+            <button type="button" class="btn-ghost btn-sm" onclick="addToBrandPool('${escapeHtml(pool.id)}')">Add selected</button>
+          </div>`
+              : ""
+          }
+          ${poolMediaSectionHtml(pool)}
         </div>`;
     })
     .join("");
+}
+
+async function uploadPoolMedia(poolId, input) {
+  const files = [...(input?.files || [])];
+  if (!files.length) return;
+  const pool = (gaBrandPools.pools || []).find((p) => p.id === poolId);
+  log(
+    `Uploading ${files.length} video(s) to ${pool?.name || poolId} pool…`,
+    "info"
+  );
+  let ok = 0;
+  let failed = 0;
+  for (const file of files) {
+    const fd = new FormData();
+    fd.append("file", file);
+    try {
+      const res = await fetch(`/api/brand-pools/${encodeURIComponent(poolId)}/media`, {
+        method: "POST",
+        body: fd,
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || "Upload failed");
+      const parts = [];
+      if (data.copied?.length) parts.push(`added to ${data.copied.length}`);
+      if (data.skipped_existing?.length) parts.push(`${data.skipped_existing.length} already had it`);
+      if (data.skipped_locked?.length) parts.push(`${data.skipped_locked.length} locked`);
+      if (data.errors?.length) parts.push(`${data.errors.length} failed`);
+      log(
+        `“${data.filename}” → ${pool?.name || poolId}: ${parts.join(", ") || "no accounts"}`,
+        data.errors?.length ? "error" : "success"
+      );
+      if (gaPoolMedia[poolId]) gaPoolMedia[poolId].files = data.files || gaPoolMedia[poolId].files;
+      ok += 1;
+    } catch (err) {
+      failed += 1;
+      log(`“${file.name}”: ${err.message}`, "error");
+    }
+  }
+  if (files.length > 1) {
+    log(
+      `Pool upload done: ${ok} succeeded, ${failed} failed`,
+      failed ? "error" : "success"
+    );
+  }
+  renderBrandPools();
+  input.value = "";
+}
+
+async function deletePoolMedia(poolId, filename) {
+  const pool = (gaBrandPools.pools || []).find((p) => p.id === poolId);
+  if (!confirm(`Delete “${filename}” from every account in ${pool?.name || poolId}?`)) return;
+  try {
+    const res = await fetch(`/api/brand-pools/${encodeURIComponent(poolId)}/media/delete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filename }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || "Delete failed");
+    log(
+      `Deleted “${data.filename}” from ${data.deleted?.length || 0} account(s) in ${pool?.name || poolId}`,
+      data.errors?.length ? "error" : "success"
+    );
+    if (gaPoolMedia[poolId]) gaPoolMedia[poolId].files = data.files || [];
+    renderBrandPools();
+  } catch (err) {
+    log(err.message, "error");
+  }
 }
 
 async function saveBrandPoolAccounts(poolId, accountIds) {
@@ -4333,17 +6012,51 @@ async function saveBrandPoolAccounts(poolId, accountIds) {
   return res.json();
 }
 
+async function togglePoolPosting(poolId, disable) {
+  const pool = (gaBrandPools.pools || []).find((p) => p.id === poolId);
+  const enabled = !disable;
+  try {
+    const res = await fetch(
+      `/api/brand-pools/${encodeURIComponent(poolId)}/posting`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled }),
+      }
+    );
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Failed to update posting setting");
+    }
+    if (pool) pool.posting_enabled = enabled;
+    renderBrandPools();
+    log(
+      `Reel posting ${enabled ? "enabled" : "disabled"} for ${pool?.name || poolId} pool`
+    );
+  } catch (err) {
+    log(err.message, "error");
+    await loadBrandPools();
+  }
+}
+
 async function addToBrandPool(poolId) {
-  const select = document.querySelector(`select[data-pool-add="${poolId}"]`);
-  if (!select || !select.value) return;
+  const list = document.querySelector(`[data-pool-add-list="${poolId}"]`);
+  if (!list) return;
+  const selected = [...list.querySelectorAll('input[type="checkbox"]:checked')].map(
+    (el) => el.value
+  );
+  if (!selected.length) return;
   const pool = (gaBrandPools.pools || []).find((p) => p.id === poolId);
   const current = (pool?.accounts || []).map((a) => a.account_id);
-  if (current.includes(select.value)) return;
+  const toAdd = selected.filter((id) => !current.includes(id));
+  if (!toAdd.length) return;
   try {
-    await saveBrandPoolAccounts(poolId, [...current, select.value]);
+    await saveBrandPoolAccounts(poolId, [...current, ...toAdd]);
     await loadBrandPools();
     await loadGaAccounts();
-    log(`Added @${select.value} to ${pool?.name || poolId} pool`);
+    log(
+      `Added ${toAdd.map((id) => `@${id}`).join(", ")} to ${pool?.name || poolId} pool`
+    );
   } catch (err) {
     log(err.message, "error");
   }
@@ -4397,8 +6110,18 @@ document.addEventListener("DOMContentLoaded", async () => {
     setGaStatus(err.message, "error");
   }
   updateContextStrip();
+  startAccountStatusPolling();
   if (currentMainTab === "tools" && activeSerial) {
     connectWeditor();
   }
   log("GramAddict dashboard ready");
+});
+
+// A tab left open for hours can show stale template/account state (e.g. an
+// account still listed under an old template after it was re-applied elsewhere).
+// Re-fetch accounts + templates whenever the tab regains focus so the view
+// self-heals against the backend, which is always the source of truth.
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return;
+  loadGaAccounts().catch(() => {});
 });

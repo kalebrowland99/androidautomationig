@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from math import nan
 from os import getcwd, rename, walk
 from pathlib import Path
@@ -184,7 +184,7 @@ def get_instagram_version():
     return version
 
 
-def open_instagram_with_url(url) -> bool:
+def open_instagram_with_url(url, *, fast: bool = False) -> bool:
     logger.info(f"Open Instagram app with url: {url}")
     # Append the Instagram package so Android routes the VIEW intent straight to the
     # app instead of showing the "open with Instagram or browser" chooser.
@@ -195,11 +195,132 @@ def open_instagram_with_url(url) -> bool:
     )
     cmd_res = subprocess.run(cmd, stdout=PIPE, stderr=PIPE, shell=True, encoding="utf8")
     err = cmd_res.stderr.strip()
-    random_sleep()
+    if fast:
+        random_sleep(0.15, 0.35, modulable=False, minimum=0.05)
+    else:
+        random_sleep()
     if err:
         logger.debug(err)
         return False
     return True
+
+
+def instagram_profile_url(username: str) -> str:
+    clean = username.strip().lstrip("@")
+    return f"https://www.instagram.com/{clean}/"
+
+
+_PROFILE_UNAVAILABLE_PATTERNS = (
+    r"page isn't available",
+    r"page may have been removed",
+    r"link you followed may be broken",
+    r"user not found",
+    r"couldn't find",
+    r"this page could not be found",
+    r"go back to instagram",
+)
+
+
+def is_instagram_profile_unavailable(device, *, fast: bool = False) -> bool:
+    from GramAddict.core.device_facade import Timeout
+
+    ui_timeout = Timeout.ZERO if fast else Timeout.SHORT
+    combined = "|".join(_PROFILE_UNAVAILABLE_PATTERNS)
+    return device.find(textMatches=rf"(?i)(?:{combined})").exists(ui_timeout)
+
+
+def _profile_chrome_visible(device, ui_timeout) -> bool:
+    """True when profile header content is on screen (not the gray loading shell)."""
+    from GramAddict.core.views import ProfileView
+
+    for label in ("followers", "following", "posts"):
+        if device.find(textContains=label).exists(ui_timeout):
+            return True
+    if ProfileView(device, is_own_profile=False).StoryRing().exists(ui_timeout):
+        return True
+    return False
+
+
+def _wait_for_profile_page(device, *, fast: bool) -> str:
+    """Wait out Instagram's blank gray loading state after a profile deep link.
+
+    Returns ``ok``, ``missing`` (account does not exist), or ``timeout``.
+    """
+    from GramAddict.core.device_facade import Timeout
+
+    deadline = time.time() + (5.0 if fast else 8.0)
+    while time.time() < deadline:
+        if is_instagram_profile_unavailable(device, fast=True):
+            return "missing"
+        if _profile_chrome_visible(device, Timeout.ZERO):
+            return "ok"
+        random_sleep(0.3, 0.5, modulable=False, minimum=0.05, log=False)
+
+    ui_timeout = Timeout.TINY if fast else Timeout.SHORT
+    if is_instagram_profile_unavailable(device, fast=True):
+        return "missing"
+    if _profile_chrome_visible(device, ui_timeout):
+        return "ok"
+    return "timeout"
+
+
+def navigate_to_profile_via_url(
+    device, username: str, *, fast: bool = False
+) -> tuple[bool, bool]:
+    """Open a profile with an Instagram deep link (adb VIEW intent).
+
+    Returns (success, account_missing). ``account_missing`` is True when the
+    account does not exist and should be dropped from a source list.
+    """
+    clean = username.strip().lstrip("@")
+    if not clean:
+        return False, False
+    if not open_instagram_with_url(instagram_profile_url(clean), fast=fast):
+        logger.warning(f"Could not open profile URL for @{clean}.")
+        return False, False
+
+    state = _wait_for_profile_page(device, fast=fast)
+    check_instagram_rate_limit(device)
+    if state == "missing":
+        logger.info(f"@{clean}: profile unavailable — account does not exist.")
+        return False, True
+    if state == "ok":
+        logger.debug(f"@{clean}: profile loaded after deep link.")
+        return True, False
+
+    logger.warning(f"@{clean}: profile still blank/loading after URL open.")
+    return False, False
+
+
+def remove_usernames_from_list_file(filename: str, usernames: set) -> int:
+    """Remove usernames from a plaintext list file. Comment lines are kept."""
+    from atomicwrites import atomic_write
+
+    normalized = {
+        u.strip().lstrip("@").casefold() for u in usernames if u and str(u).strip()
+    }
+    if not normalized or not os.path.isfile(filename):
+        return 0
+
+    with open(filename, "r", encoding="utf-8") as handle:
+        lines = handle.readlines()
+
+    kept = []
+    removed = 0
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            kept.append(line if line.endswith("\n") else line + "\n")
+            continue
+        if stripped.lstrip("@").casefold() in normalized:
+            removed += 1
+            continue
+        kept.append(line if line.endswith("\n") else line + "\n")
+
+    if removed:
+        with atomic_write(filename, overwrite=True, encoding="utf-8") as handle:
+            handle.writelines(kept)
+    return removed
 
 
 def kill_app(device, app_id):
@@ -267,6 +388,7 @@ def open_instagram(device):
             return False
         n += 1
         logger.info(f"Waiting for Instagram to open... 😴 ({n}/{max_tries})")
+        check_instagram_rate_limit(device)
         if check_if_crash_popup_is_there(device):
             logger.info("Ig crashed, try to open it again...")
         call_ig()
@@ -328,11 +450,115 @@ def close_instagram(device):
 
 
 def check_if_crash_popup_is_there(device) -> bool:
+    check_instagram_rate_limit(device)
     obj = device.find(resourceId=ResourceID.CRASH_POPUP)
     if obj.exists():
         obj.click()
         return True
     return False
+
+
+def _case_insensitive_re(pattern: str) -> str:
+    return f"(?i){pattern}"
+
+
+def is_instagram_try_again_later_visible(device) -> bool:
+    """True when Instagram's 'Try Again Later' action-limit dialog is on screen."""
+    from GramAddict.core.device_facade import Timeout
+
+    title = device.find(textMatches=_case_insensitive_re(r"try\s+again\s+later"))
+    if title.exists(Timeout.ZERO):
+        return True
+    limit_msg = device.find(
+        textMatches=_case_insensitive_re(r"we\s+limit\s+how\s+often")
+    )
+    if limit_msg.exists(Timeout.ZERO):
+        return True
+    for rid in (
+        ResourceID.IGDS_HEADLINE_EMPHASIZED_HEADLINE,
+        ResourceID.IGDS_HEADLINE_BODY,
+    ):
+        obj = device.find(resourceIdMatches=rid)
+        if not obj.exists(Timeout.ZERO):
+            continue
+        text = (obj.get_text() or "").lower()
+        if "try again later" in text or "limit how often" in text:
+            return True
+    return False
+
+
+def dismiss_instagram_try_again_later(device) -> bool:
+    from GramAddict.core.device_facade import Timeout
+
+    for matcher in (
+        dict(resourceIdMatches=ResourceID.PRIMARY_BUTTON),
+        dict(resourceIdMatches=ResourceID.NEGATIVE_BUTTON),
+        dict(textMatches=_case_insensitive_re(r"^ok$")),
+    ):
+        btn = device.find(**matcher)
+        if btn.exists(Timeout.TINY):
+            logger.info("Dismissing Instagram 'Try Again Later' dialog.")
+            btn.click()
+            random_sleep(0.5, 1.0, modulable=False, minimum=0.2)
+            return True
+    return False
+
+
+def check_instagram_rate_limit(device, *, raise_on_limit: bool = True) -> bool:
+    """Detect Instagram action limits. Optionally raise to pause the session."""
+    if not is_instagram_try_again_later_visible(device):
+        return False
+    logger.warning(
+        "Instagram 'Try Again Later' rate limit detected — automation will pause.",
+        extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
+    )
+    dismiss_instagram_try_again_later(device)
+    if raise_on_limit:
+        raise InstagramRateLimitError(
+            "Instagram showed 'Try Again Later' — taking a break before resuming."
+        )
+    return True
+
+
+def take_rate_limit_break(device, session_state, sessions, configs) -> None:
+    """Close Instagram and sleep until it is safe to resume automation."""
+    from GramAddict.core.live_progress import write_live_progress
+    from GramAddict.plugins.telegram import send_telegram_alert
+
+    minutes = int(get_value(getattr(configs.args, "rate_limit_break", None), None, 720))
+    username = session_state.my_username or getattr(configs.args, "username", None)
+    send_telegram_alert(
+        username,
+        "Instagram rate limit",
+        f"'Try Again Later' detected. Pausing automation for {minutes} minutes.",
+    )
+    close_instagram(device)
+    next_session_at = datetime.now() + timedelta(minutes=minutes)
+    logger.info(
+        f"Rate-limit break: sleeping {minutes} minutes — next attempt at "
+        f"{next_session_at.strftime('%I:%M:%S %p (%Y/%m/%d)')}.",
+        extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
+    )
+    write_live_progress(
+        username,
+        session_state,
+        running=True,
+        sleeping=True,
+        next_session_at=next_session_at.isoformat(timespec="seconds"),
+        current_job=None,
+    )
+    try:
+        sleep(minutes * 60)
+    except KeyboardInterrupt:
+        stop_bot(device, sessions, session_state, was_sleeping=True)
+    write_live_progress(
+        username,
+        session_state,
+        running=True,
+        sleeping=False,
+        next_session_at=None,
+        current_job=None,
+    )
 
 
 def show_ending_conditions():
@@ -464,7 +690,7 @@ def _restore_keyboard(device):
     device.deviceV2.set_fastinput_ime(False)
 
 
-def random_sleep(inf=0.5, sup=3.0, modulable=True, log=True):
+def random_sleep(inf=0.5, sup=3.0, modulable=True, log=True, minimum=None):
     MIN_INF = 0.3
     speed_multiplier = 1.0
     try:
@@ -472,7 +698,8 @@ def random_sleep(inf=0.5, sup=3.0, modulable=True, log=True):
     except (NameError, AttributeError):
         pass
     delay = uniform(inf, sup) / (speed_multiplier if modulable else 1.0)
-    delay = max(delay, MIN_INF)
+    floor = MIN_INF if minimum is None else minimum
+    delay = max(delay, floor)
     if log:
         logger.debug(f"{str(delay)[:4]}s sleep")
     sleep(delay)
@@ -505,16 +732,12 @@ def save_crash(device):
         pass
     if screen_record:
         try:
+            # Archives the clip as a plain .mp4 under videos/crashed/ (not zipped).
             device.stop_screenrecord(crash=True)
         except Exception as e:
             logger.error(
                 f"You can't use this feature without installing dependencies. Type that in console: 'pip3 install -U \"uiautomator2[image]\" -i https://pypi.doubanio.com/simple'. Exception: {e}"
             )
-        files = [f for f in os.listdir("./") if f.endswith(".mp4")]
-        try:
-            os.replace(files[-1], os.path.join(crash_path, "video.mp4"))
-        except (FileNotFoundError, IndexError):
-            logger.error("File *.mp4 not found!")
     try:
         g_log_file_name, g_logs_dir, _, _ = get_log_file_config()
         src_file = os.path.join(g_logs_dir, g_log_file_name)
@@ -544,6 +767,21 @@ def save_crash(device):
                 )
     except (NameError, AttributeError):
         pass
+
+    # A great many "can't find element" crashes are really a popup/modal covering
+    # the UI. Rate-limit dialogs must pause the session — never auto-dismiss them.
+    try:
+        check_instagram_rate_limit(device)
+    except InstagramRateLimitError:
+        raise
+    try:
+        from GramAddict.core.vision_popup import dismiss_popup_with_vision
+
+        dismiss_popup_with_vision(device, reason="save_crash")
+    except InstagramRateLimitError:
+        raise
+    except Exception as e:
+        logger.debug(f"Vision popup dismissal skipped: {e}")
 
 
 def trim_txt(source: str, target: str) -> None:
@@ -627,6 +865,24 @@ def get_value(
     if name is not None:
         logger.info(name.format(value), extra={"color": Style.BRIGHT})
     return value
+
+
+def skip_first_row_enabled(args) -> bool:
+    """True if the profile-grid first row should be skipped.
+
+    Prefers the new boolean ``skip-first-row``; falls back to the legacy numeric
+    ``skip-top-profile-posts`` (>0 means skip) so configs not yet migrated keep
+    working.
+    """
+    if bool(getattr(args, "skip_first_row", False)):
+        return True
+    legacy = getattr(args, "skip_top_profile_posts", None)
+    if legacy is None:
+        legacy = getattr(args, "skip_pinned_posts", None)
+    try:
+        return int(get_value(legacy, None, 0) or 0) > 0
+    except (ValueError, TypeError):
+        return False
 
 
 def validate_url(x) -> bool:
@@ -776,6 +1032,10 @@ def inspect_current_view(user_list) -> Tuple[int, int]:
 
 class ActionBlockedError(Exception):
     pass
+
+
+class InstagramRateLimitError(ActionBlockedError):
+    """Instagram 'Try Again Later' action limit — session should pause, not crash."""
 
 
 class EmptyList(Exception):

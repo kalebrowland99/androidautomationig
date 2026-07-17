@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import re
 import shutil
@@ -10,10 +11,12 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 
 import yaml
+from atomicwrites import atomic_write
 
 from GramAddict.core.account_safety import apply_autopost_lock, is_autopost_locked, AUTOPOST_LOCKED_USERNAMES
 
@@ -23,6 +26,7 @@ CONFIG_TEMPLATE = PROJECT_ROOT / "config-examples" / "config.yml"
 
 _bot_processes: dict[str, subprocess.Popen[str]] = {}
 _bot_log_buffers: dict[str, list[str]] = {}
+_story_likes_log_buffers: dict[str, list[str]] = {}
 BOT_PID_FILENAME = ".bot.pid"
 
 from dashboard.gramaddict_fields import (
@@ -74,6 +78,95 @@ UNFOLLOW_LIMIT_KEY = "unfollow-from-list"
 REMOVE_LIMIT_KEY = "remove-followers-from-list"
 # Dashboard-only keys — never written to config.yml (run.py does not accept them).
 DASHBOARD_ONLY_CONFIG_KEYS = frozenset({"brand-pool"})
+
+# Accounts the operator has manually paused (e.g. under Instagram selfie
+# verification). Stored in a dashboard-only sidecar so it never reaches the bot
+# config; maps account_id -> {"reason": str, "at": iso8601}.
+DISABLED_FILE = ACCOUNTS_DIR / ".disabled.json"
+
+
+def load_disabled() -> dict[str, Any]:
+    if not DISABLED_FILE.is_file():
+        return {}
+    try:
+        data = json.loads(DISABLED_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_disabled(data: dict[str, Any]) -> None:
+    DISABLED_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with atomic_write(DISABLED_FILE, overwrite=True, encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2, sort_keys=True)
+
+
+def account_disabled_info(account_id: str) -> Optional[dict[str, Any]]:
+    """Return `{reason, at}` if the account is disabled, else None."""
+    entry = load_disabled().get(account_id)
+    return entry if isinstance(entry, dict) else None
+
+
+NOTES_FILE = ACCOUNTS_DIR / ".notes.json"
+
+
+def load_notes() -> dict[str, Any]:
+    if not NOTES_FILE.is_file():
+        return {}
+    try:
+        data = json.loads(NOTES_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_notes(data: dict[str, Any]) -> None:
+    NOTES_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with atomic_write(NOTES_FILE, overwrite=True, encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2, sort_keys=True)
+
+
+def get_account_note(account_id: str) -> str:
+    """Free-form note the user attached to this account (empty if none)."""
+    value = load_notes().get(account_id, "")
+    return value if isinstance(value, str) else ""
+
+
+def set_account_note(account_id: str, note: str) -> dict[str, Any]:
+    """Save (or clear) the free-form note for an account."""
+    data = load_notes()
+    note = (note or "").strip()
+    if note:
+        data[account_id] = note
+    else:
+        data.pop(account_id, None)
+    _save_notes(data)
+    return {"id": account_id, "note": note}
+
+
+def set_account_disabled(
+    account_id: str, disabled: bool, reason: str = ""
+) -> dict[str, Any]:
+    """Pause or resume an account. Disabling a running bot also stops it."""
+    data = load_disabled()
+    if disabled:
+        data[account_id] = {
+            "reason": (reason or "").strip(),
+            "at": datetime.now().isoformat(timespec="seconds"),
+        }
+        _save_disabled(data)
+        # Stop it now so a paused account can't keep running.
+        if _account_bot_running(account_id):
+            stop_bot(account_id, force=True)
+    else:
+        data.pop(account_id, None)
+        _save_disabled(data)
+    info = account_disabled_info(account_id)
+    return {
+        "id": account_id,
+        "disabled": info is not None,
+        "disabled_reason": (info or {}).get("reason", ""),
+    }
 
 
 def _safe_account_id(name: str) -> str:
@@ -394,6 +487,13 @@ def sync_config_for_bot(account_id: str, data: dict[str, Any]) -> dict[str, Any]
     story_usernames = out.pop(STORY_LIKES_LIST_KEY, None)
     story_limit = str(out.pop(STORY_LIKES_LIMIT_KEY, None) or "").strip()
     if not story_limit:
+        # Prefer the limit already encoded in the incoming daily-story-likes job
+        # (e.g. a raw config edit or `story_likes.txt 80-100`) before falling
+        # back to the account's saved meta.
+        story_limit = _first_file_job_limit(
+            out.get(STORY_LIKES_JOB_KEY), STORY_LIKES_LIST_FILE
+        )
+    if not story_limit:
         story_limit = str(_load_story_likes_meta(account_dir).get("limit") or "").strip()
     out.pop("daily-story-likes-hours", None)
     cleaned_story: list[str] = []
@@ -685,6 +785,11 @@ def _kill_pid_tree(pid: int, *, grace_seconds: float = 3.0) -> None:
         except ProcessLookupError:
             return
 
+    if grace_seconds <= 0:
+        # Immediate hard kill — no graceful SIGTERM window.
+        _signal_process(signal.SIGKILL)
+        return
+
     _signal_process(signal.SIGTERM)
     deadline = time.monotonic() + grace_seconds
     while time.monotonic() < deadline:
@@ -910,13 +1015,23 @@ def list_accounts() -> list[dict[str, Any]]:
         if not config_path.is_file():
             continue
         data = _load_yaml(config_path)
+        username = data.get("username") or folder.name
+        running = _account_bot_running(folder.name)
+        disabled_info = account_disabled_info(folder.name)
         accounts.append(
             {
                 "id": folder.name,
-                "username": data.get("username") or folder.name,
+                "username": username,
                 "device": data.get("device") or "",
+                "device_id": device_id_for_account(folder.name),
                 "config_path": str(config_path.relative_to(PROJECT_ROOT)),
-                "running": _account_bot_running(folder.name),
+                "running": running,
+                "last_error": recent_bot_error(username),
+                "progress": _live_progress_snapshot(username) if running else None,
+                "disabled": disabled_info is not None,
+                "disabled_reason": (disabled_info or {}).get("reason", ""),
+                "note": get_account_note(folder.name),
+                "story_likes_enabled": _story_likes_enabled(folder.name),
             }
         )
     return accounts
@@ -992,6 +1107,114 @@ def account_id_for_device(serial: str) -> str | None:
         if data.get("device") == device_serial:
             return folder.name
     return None
+
+
+# ── Stable phone ↔ account links (survive ADB serial / wireless IP changes) ──
+# Stored outside config.yml (run.py's parser only understands the `device` key),
+# as a central map of hardware_id → account_id.
+DEVICE_LINKS_FILE = ACCOUNTS_DIR / ".device_links.json"
+
+
+def _load_device_links() -> dict[str, str]:
+    if not DEVICE_LINKS_FILE.is_file():
+        return {}
+    try:
+        data = json.loads(DEVICE_LINKS_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items() if k and v}
+
+
+def _save_device_links(links: dict[str, str]) -> None:
+    ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
+    with atomic_write(DEVICE_LINKS_FILE, overwrite=True, encoding="utf-8") as handle:
+        json.dump(links, handle, indent=2, sort_keys=True)
+
+
+def set_device_link(hardware_id: str, account_id: str) -> None:
+    hardware_id = (hardware_id or "").strip()
+    account_id = (account_id or "").strip()
+    if not hardware_id or not account_id:
+        return
+    links = _load_device_links()
+    # a hardware id maps to exactly one account; an account to one phone
+    links = {hw: acc for hw, acc in links.items() if acc != account_id}
+    links[hardware_id] = account_id
+    _save_device_links(links)
+
+
+def clear_device_link_for_account(account_id: str) -> None:
+    account_id = (account_id or "").strip()
+    if not account_id:
+        return
+    links = _load_device_links()
+    trimmed = {hw: acc for hw, acc in links.items() if acc != account_id}
+    if trimmed != links:
+        _save_device_links(trimmed)
+
+
+def device_id_for_account(account_id: str) -> str:
+    account_id = (account_id or "").strip()
+    if not account_id:
+        return ""
+    for hardware_id, acc in _load_device_links().items():
+        if acc == account_id:
+            return hardware_id
+    return ""
+
+
+def _clear_device_serial_from_others(serial: str, keep_account_id: str) -> None:
+    if not ACCOUNTS_DIR.is_dir():
+        return
+    for folder in ACCOUNTS_DIR.iterdir():
+        if not folder.is_dir() or folder.name == keep_account_id:
+            continue
+        config_path = folder / "config.yml"
+        if not config_path.is_file():
+            continue
+        data = _load_yaml(config_path)
+        if data.get("device") == serial:
+            data.pop("device", None)
+            _save_account_config_yaml(config_path, data)
+
+
+def reconcile_device_links(devices: list[dict[str, Any]]) -> bool:
+    """Heal phone↔account links when ADB serials change (e.g. wireless IP change).
+
+    `devices` should include `serial` and `hardware_id`. Returns True if any
+    account's linked serial was updated or a new link was recorded.
+    """
+    links = _load_device_links()
+    links_changed = False
+    healed = False
+    for dev in devices:
+        serial = str(dev.get("serial") or "").strip()
+        hardware_id = str(dev.get("hardware_id") or "").strip()
+        if not serial or not hardware_id:
+            continue
+        account_id = links.get(hardware_id)
+        if account_id:
+            config_path = _config_path(account_id)
+            if not config_path.is_file():
+                links.pop(hardware_id, None)
+                links_changed = True
+                continue
+            data = _load_yaml(config_path)
+            if data.get("device") != serial:
+                _clear_device_serial_from_others(serial, keep_account_id=account_id)
+                data["device"] = serial
+                _save_account_config_yaml(config_path, data)
+                healed = True
+        else:
+            owner = account_id_for_device(serial)
+            if owner:
+                links[hardware_id] = owner
+                links_changed = True
+    if links_changed:
+        _save_device_links(links)
+    return healed or links_changed
 
 
 def parse_username_list_text(content: str) -> list[str]:
@@ -1075,6 +1298,7 @@ def assign_account_to_device(serial: str, username: str | None) -> dict[str, Any
             if data.get("device") == device_serial:
                 data.pop("device", None)
                 _save_account_config_yaml(config_path, data)
+                clear_device_link_for_account(folder.name)
         return {"serial": device_serial, "account_id": None, "username": ""}
 
     account_id = _safe_account_id(handle)
@@ -1094,10 +1318,22 @@ def assign_account_to_device(serial: str, username: str | None) -> dict[str, Any
                 _save_account_config_yaml(config_path, data)
 
     save_account_config(account_id, {"username": handle, "device": device_serial})
+
+    hardware_id = ""
+    try:
+        from dashboard import device_service
+
+        hardware_id = device_service.get_hardware_id(device_serial)
+    except Exception:
+        hardware_id = ""
+    if hardware_id:
+        set_device_link(hardware_id, account_id)
+
     return {
         "serial": device_serial,
         "account_id": account_id,
         "username": handle,
+        "device_id": hardware_id,
     }
 
 
@@ -1128,6 +1364,10 @@ def get_account(account_id: str) -> dict[str, Any]:
     post_reel_path = _account_dir(account_id) / "post_reel.yml"
     if post_reel_path.is_file():
         post_reel = _load_yaml(post_reel_path)
+    follow_vision: dict[str, Any] = {}
+    follow_vision_path = _account_dir(account_id) / "follow_vision.yml"
+    if follow_vision_path.is_file():
+        follow_vision = _load_yaml(follow_vision_path)
     hydrated = hydrate_config_for_ui(data, account_id)
     estimate_cfg = dict(data)
     for ui_key in (
@@ -1145,13 +1385,19 @@ def get_account(account_id: str) -> dict[str, Any]:
         "id": account_id,
         "username": data.get("username") or account_id,
         "device": data.get("device") or "",
+        "device_id": device_id_for_account(account_id),
         "config_path": str(config_path.relative_to(PROJECT_ROOT)),
         "raw": data,
         "form": config_for_ui(data, account_id),
         "raw_yaml": raw_yaml,
-        "estimate": estimate_session(estimate_cfg, post_reel=post_reel),
+        "estimate": estimate_session(
+            estimate_cfg, post_reel=post_reel, follow_vision=follow_vision
+        ),
         "running": _account_bot_running(account_id),
         "autopost_locked": locked,
+        "disabled": account_disabled_info(account_id) is not None,
+        "disabled_reason": (account_disabled_info(account_id) or {}).get("reason", ""),
+        "note": get_account_note(account_id),
     }
 
 
@@ -1173,6 +1419,11 @@ def save_account_config(account_id: str, updates: dict[str, Any]) -> dict[str, A
         raise FileNotFoundError(f"Account not found: {account_id}")
     data = _load_yaml(config_path)
     merged = config_from_ui(updates)
+    # Only touch brand-pool membership when the caller actually sent the field.
+    # Partial saves (e.g. linking/unlinking a device on connect/disconnect/stop)
+    # don't include "brand-pool"; treating that absence as "clear it" was silently
+    # dropping accounts from their pool whenever the bot stopped or a phone dropped.
+    has_brand_pool = "brand-pool" in merged
     brand_pool = merged.pop("brand-pool", None) or None
     for key, value in merged.items():
         if value is None:
@@ -1181,10 +1432,317 @@ def save_account_config(account_id: str, updates: dict[str, Any]) -> dict[str, A
             data[key] = value
     data = sync_config_for_bot(account_id, data)
     _save_account_config_yaml(config_path, data)
-    from dashboard.brand_pools import sync_account_brand_pool
+    if has_brand_pool:
+        from dashboard.brand_pools import sync_account_brand_pool
 
-    sync_account_brand_pool(account_id, brand_pool)
+        sync_account_brand_pool(account_id, brand_pool)
     return get_account(account_id)
+
+
+LOGS_DIR = PROJECT_ROOT / "logs"
+
+
+def _story_likes_enabled(account_id: str) -> bool:
+    """True when daily story likes is enabled for this account."""
+    account_dir = ACCOUNTS_DIR / account_id
+    if not account_dir.is_dir():
+        return False
+    enabled, _, _ = _story_likes_from_disk(account_dir)
+    if enabled:
+        return True
+    data = _load_yaml(account_dir / "config.yml")
+    return bool(_file_job_entries(data.get(STORY_LIKES_JOB_KEY)))
+
+
+_STORY_LIKES_MAIN_LOG_MARKERS = (
+    "daily story likes",
+    "story likes |",
+    "story segment",
+    "has no new story",
+    "has no story",
+    "last story check",
+    "already checked today",
+    "story watch limit reached",
+    "accounts checked for stories",
+    "daily-story-likes",
+    "session start",
+    "removed from list",
+    "added to story list",
+    "job complete",
+    "could not open profile",
+    "checked — no story",
+)
+
+
+def _extract_story_likes_lines(lines: list[str]) -> list[str]:
+    out: list[str] = []
+    for line in lines:
+        lower = line.lower()
+        if "plugin_loader.py" in lower:
+            continue
+        if "like new stories for a fixed list" in lower:
+            continue
+        if any(marker in lower for marker in _STORY_LIKES_MAIN_LOG_MARKERS):
+            out.append(line)
+    return out
+
+
+def read_story_likes_log(account_id: str, *, max_lines: int = 400) -> dict[str, Any]:
+    """Tail the dedicated story-likes log, with fallback to filtered main log."""
+    username = _account_username(account_id)
+    enabled = _story_likes_enabled(account_id)
+    dedicated = LOGS_DIR / f"{username}_story_likes.log"
+    lines: list[str] = []
+    if dedicated.is_file():
+        approx_bytes = max(32768, max_lines * 120)
+        lines = _read_log_tail(dedicated, max_bytes=approx_bytes)
+    if not lines:
+        main_path = LOGS_DIR / f"{username}.log"
+        approx_bytes = max(4_194_304, max_lines * 220)
+        main_lines = _read_log_tail(main_path, max_bytes=approx_bytes)
+        lines = _extract_story_likes_lines(main_lines)
+    if max_lines > 0:
+        lines = lines[-max_lines:]
+    return {
+        "account_id": account_id,
+        "username": username,
+        "enabled": enabled,
+        "exists": dedicated.is_file() or bool(lines),
+        "running": _account_bot_running(account_id),
+        "lines": lines,
+    }
+
+
+def is_story_likes_log_line(message: str) -> bool:
+    lower = (message or "").lower()
+    if "plugin_loader.py" in lower:
+        return False
+    if "like new stories for a fixed list" in lower:
+        return False
+    return any(marker in lower for marker in _STORY_LIKES_MAIN_LOG_MARKERS)
+
+
+# How old the most recent error may be and still count as "recent" (surfaced in
+# the UI). Errors older than this are treated as stale and hidden.
+RECENT_ERROR_WINDOW = timedelta(hours=24)
+
+# GramAddict log line: "[MM/DD HH:MM:SS] LEVEL | message (file.py:line)".
+# The timestamp is either 24-hour ("15:09:03") or 12-hour ("07:19:47 PM").
+_LOG_LINE_RE = re.compile(
+    r"^\[(?P<ts>[^\]]+)\]\s+(?P<level>[A-Z]+)\s+\|\s+(?P<msg>.*)$"
+)
+_ERROR_LEVELS = {"ERROR", "CRITICAL"}
+
+
+def _parse_log_timestamp(ts: str) -> Optional[datetime]:
+    """Parse a GramAddict log timestamp (no year) into a datetime.
+
+    The log omits the year, so we assume the current year and roll back a year
+    if that would place the entry in the future (handles year-boundary logs).
+    """
+    ts = ts.strip()
+    now = datetime.now()
+    for fmt in ("%m/%d %H:%M:%S", "%m/%d %I:%M:%S %p"):
+        try:
+            parsed = datetime.strptime(ts, fmt).replace(year=now.year)
+        except ValueError:
+            continue
+        if parsed - now > timedelta(days=1):
+            parsed = parsed.replace(year=now.year - 1)
+        return parsed
+    return None
+
+
+def _read_log_tail(path: Path, *, max_bytes: int = 65536) -> list[str]:
+    """Return the last chunk of a log file as lines (cheap for large logs)."""
+    try:
+        size = path.stat().st_size
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            if size > max_bytes:
+                fh.seek(size - max_bytes)
+                fh.readline()  # discard partial first line
+            return fh.read().splitlines()
+    except OSError:
+        return []
+
+
+def _live_progress_path(username: str) -> Path:
+    return ACCOUNTS_DIR / username / "live_progress.json"
+
+
+def _run_baseline(username: str) -> Optional[datetime]:
+    """Start time of the current/most-recent run, from live_progress.
+
+    Errors logged before this are from a previous run and should not surface —
+    that's how "hitting a new run clears the recent errors" is enforced.
+    """
+    path = _live_progress_path(username)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        started = data.get("session_started_at")
+        if started:
+            return datetime.fromisoformat(started)
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        return None
+    return None
+
+
+def reset_run_state(account_id: str) -> None:
+    """Clear stale progress + error state at the start of a fresh run.
+
+    Writes a zeroed live_progress snapshot (its ``session_started_at`` becomes
+    the new baseline so older log errors stop showing) and drops the in-memory
+    log buffer, so the dashboard's data and "recent error" tag start clean.
+    """
+    username = _account_username(account_id)
+    now = datetime.now().isoformat(timespec="seconds")
+    payload = {
+        "username": username,
+        "running": True,
+        "current_job": "starting",
+        "updated_at": now,
+        "session_started_at": now,
+        "total_likes": 0,
+        "total_followed": 0,
+        "total_unfollowed": 0,
+        "total_watched": 0,
+        "total_story_likes": 0,
+        "total_daily_story_accounts": 0,
+        "daily_story_likes_limit": None,
+        "total_comments": 0,
+        "total_pm": 0,
+        "total_interactions": 0,
+        "limits": {},
+    }
+    path = _live_progress_path(username)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with atomic_write(path, overwrite=True, encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+    except OSError:
+        pass
+    _bot_log_buffers.pop(account_id, None)
+
+
+def recent_bot_error(username: str) -> Optional[dict[str, Any]]:
+    """Most recent ERROR/CRITICAL line from the account's log, if it's recent.
+
+    Returns ``{"message", "level", "at", "recent"}`` for the latest error found
+    in the log tail, or ``None`` if the log has no error lines. ``recent`` is
+    True only when the error is within ``RECENT_ERROR_WINDOW`` — that's the
+    signal the UI uses to decide whether to show the error tag (e.g. an inactive
+    bot with a recent error most likely crashed).
+    """
+    if not username:
+        return None
+    path = LOGS_DIR / f"{username}.log"
+    if not path.is_file():
+        return None
+    baseline = _run_baseline(username)
+    lines = _read_log_tail(path)
+    for line in reversed(lines):
+        match = _LOG_LINE_RE.match(line.strip())
+        if not match or match.group("level") not in _ERROR_LEVELS:
+            continue
+        ts_raw = match.group("ts").strip()
+        when = _parse_log_timestamp(ts_raw)
+        if when is None:
+            # Couldn't parse the line's own timestamp — fall back to the file's
+            # last-modified time so recency detection still works.
+            try:
+                when = datetime.fromtimestamp(path.stat().st_mtime)
+            except OSError:
+                when = None
+        if baseline is not None:
+            # A run baseline exists: only errors from the current run count, so
+            # starting a new run clears older errors from the UI.
+            recent = when is not None and when >= baseline
+        else:
+            recent = when is not None and (datetime.now() - when) <= RECENT_ERROR_WINDOW
+        return {
+            "message": match.group("msg").strip(),
+            "level": match.group("level"),
+            "at": ts_raw,
+            "recent": recent,
+        }
+    return None
+
+
+def _account_username(account_id: str) -> str:
+    data = _load_yaml(_config_path(account_id))
+    return str(data.get("username") or account_id)
+
+
+def _live_progress_snapshot(username: str) -> Optional[dict[str, Any]]:
+    """Compact live counters + limits for display under the account handle."""
+    path = _live_progress_path(username)
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    limits = data.get("limits") or {}
+    # Sleeping = between-session repeat break. Only trust the flag while the
+    # scheduled resume is still in the future, so a stale flag can't linger.
+    sleeping = bool(data.get("sleeping"))
+    next_session_at = data.get("next_session_at")
+    if sleeping and next_session_at:
+        try:
+            if datetime.fromisoformat(next_session_at) <= datetime.now():
+                sleeping = False
+        except (ValueError, TypeError):
+            pass
+    return {
+        "likes": data.get("total_likes", 0),
+        "likes_limit": limits.get("likes"),
+        "follows": data.get("total_followed", 0),
+        "follows_limit": limits.get("follows"),
+        "comments": data.get("total_comments", 0),
+        "comments_limit": limits.get("comments"),
+        "watched": data.get("total_watched", 0),
+        "watches_limit": limits.get("watches"),
+        "story_likes": data.get("total_story_likes", 0),
+        "story_likes_limit": limits.get("watches"),
+        "daily_story_likes": data.get("total_daily_story_accounts", 0),
+        "daily_story_likes_limit": data.get("daily_story_likes_limit"),
+        "current_job": data.get("current_job"),
+        "sleeping": sleeping,
+        "next_session_at": next_session_at if sleeping else None,
+    }
+
+
+def accounts_status() -> list[dict[str, Any]]:
+    """Lightweight running + recent-error status for every account.
+
+    Cheaper than ``list_accounts`` (no device/config plumbing) so the frontend
+    can poll it frequently to keep the status tags live without reloading forms.
+    """
+    if not ACCOUNTS_DIR.is_dir():
+        return []
+    out: list[dict[str, Any]] = []
+    for folder in sorted(ACCOUNTS_DIR.iterdir()):
+        if not folder.is_dir() or not (folder / "config.yml").is_file():
+            continue
+        running = _account_bot_running(folder.name)
+        username = _account_username(folder.name)
+        disabled_info = account_disabled_info(folder.name)
+        out.append(
+            {
+                "id": folder.name,
+                "running": running,
+                "last_error": recent_bot_error(username),
+                "progress": _live_progress_snapshot(username) if running else None,
+                "disabled": disabled_info is not None,
+                "disabled_reason": (disabled_info or {}).get("reason", ""),
+                "story_likes_enabled": _story_likes_enabled(folder.name),
+            }
+        )
+    return out
 
 
 def bot_status(account_id: str) -> dict[str, Any]:
@@ -1193,11 +1751,42 @@ def bot_status(account_id: str) -> dict[str, Any]:
         "account_id": account_id,
         "running": pid is not None,
         "pid": pid,
+        "last_error": recent_bot_error(_account_username(account_id)),
         "logs": _bot_log_buffers.get(account_id, [])[-200:],
     }
 
 
-def stop_bot(account_id: str) -> dict[str, Any]:
+def read_bot_log(account_id: str, *, max_lines: int = 500) -> dict[str, Any]:
+    """Tail the persisted GramAddict log for an account (current + previous runs).
+
+    GramAddict appends to a single ``logs/<username>.log`` across runs, so this
+    returns recent history from disk even after the bot has stopped — which is
+    what lets the dashboard show *why* a run ended when you click its device.
+    """
+    username = _account_username(account_id)
+    path = LOGS_DIR / f"{username}.log"
+    # Read a generous byte tail, then keep only the last `max_lines` lines.
+    approx_bytes = max(65536, max_lines * 220)
+    lines = _read_log_tail(path, max_bytes=approx_bytes)
+    if max_lines > 0:
+        lines = lines[-max_lines:]
+    return {
+        "account_id": account_id,
+        "username": username,
+        "exists": path.is_file(),
+        "running": _account_bot_running(account_id),
+        "lines": lines,
+    }
+
+
+def stop_bot(account_id: str, *, force: bool = False) -> dict[str, Any]:
+    """Stop a running bot.
+
+    ``force=True`` sends SIGKILL to the whole process group immediately (no
+    graceful SIGTERM window) — used by the "Stop selected" kill button so bots
+    die instantly. A graceful stop (default) gives the bot a few seconds to
+    write its session summary first.
+    """
     proc = _bot_processes.pop(account_id, None)
     pid = None
     if proc is not None and proc.poll() is None:
@@ -1209,10 +1798,10 @@ def stop_bot(account_id: str) -> dict[str, Any]:
         _finalize_bot_process(account_id)
         return {"stopped": False, "message": "Bot is not running"}
 
-    _kill_pid_tree(pid)
+    _kill_pid_tree(pid, grace_seconds=0 if force else 3.0)
     if proc is not None:
         try:
-            proc.wait(timeout=2)
+            proc.wait(timeout=1 if force else 2)
         except subprocess.TimeoutExpired:
             pass
     _finalize_bot_process(account_id)
@@ -1230,9 +1819,17 @@ async def start_bot(
     if not config_path.is_file():
         raise FileNotFoundError(f"Account not found: {account_id}")
 
+    disabled_info = account_disabled_info(account_id)
+    if disabled_info is not None:
+        reason = disabled_info.get("reason") or "manually disabled"
+        raise RuntimeError(f"Account is disabled ({reason}). Re-enable it to run.")
+
     existing_pid = _resolve_running_bot_pid(account_id)
     if existing_pid is not None:
         raise RuntimeError("Bot is already running for this account")
+
+    # Fresh run → clear stale progress data and the recent-error baseline.
+    reset_run_state(account_id)
 
     data = _load_yaml(config_path)
     data = sync_config_for_bot(account_id, data)

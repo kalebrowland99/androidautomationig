@@ -121,6 +121,30 @@ def load_post_reel_state(account_id: str) -> dict[str, Any]:
     return {"media_selection_counter": 1}
 
 
+def _media_queue_fingerprint(files: list[Path]) -> str:
+    return "|".join(p.name for p in files)
+
+
+def sync_media_queue_state(account_id: str, files: list[Path]) -> int:
+    """Reset the rotation counter when the on-disk video queue changes.
+
+  When a fresh batch of pool videos is uploaded the filenames change, so we
+  start again at the first file instead of resuming an old counter from a
+  previous single-reel run.
+    """
+    state = load_post_reel_state(account_id)
+    fingerprint = _media_queue_fingerprint(files)
+    if state.get("media_fingerprint") != fingerprint:
+        state["media_selection_counter"] = 1
+        state["media_fingerprint"] = fingerprint
+        save_post_reel_state(account_id, state)
+        logger.info(
+            "post_media queue changed for %s — starting from the first video.",
+            account_id,
+        )
+    return int(state.get("media_selection_counter") or 1)
+
+
 def save_post_reel_state(account_id: str, state: dict[str, Any]) -> dict[str, Any]:
     path = _account_dir(account_id) / POST_REEL_STATE_FILENAME
     path.write_text(json.dumps(state, indent=2), encoding="utf-8")
@@ -186,7 +210,11 @@ def run_post_reel_session(
     posts_count: Optional[int] = None,
 ) -> dict[str, Any]:
     """Post N reels; increment counter only after each confirmed success."""
-    from GramAddict.core.post_reel import list_local_media, run_single_reel_post
+    from GramAddict.core.post_reel import (
+        list_local_media,
+        run_single_reel_post,
+        wait_for_uploads_to_finish,
+    )
     from GramAddict.core.utils import random_sleep
 
     settings = get_account_post_reel(account_id)
@@ -197,11 +225,38 @@ def run_post_reel_session(
     if not files:
         return {"success": False, "message": f"No videos in {POST_MEDIA_DIRNAME}/", "posted": 0}
 
+    count = min(count, len(files))
+    sync_media_queue_state(account_id, files)
+    counter = get_media_selection_number(account_id)
+    if counter > len(files):
+        return {
+            "success": True,
+            "message": f"All {len(files)} reel(s) in queue already posted",
+            "posted": 0,
+            "skipped": True,
+        }
+
+    remaining = len(files) - (counter - 1)
+    count = min(count, remaining)
+    if count <= 0:
+        return {
+            "success": True,
+            "message": "No reels left in queue",
+            "posted": 0,
+            "skipped": True,
+        }
+
     clear_each = bool(settings.get("clear-gallery-before-each", True))
+    # Multi-reel runs must clear the device gallery before each push — otherwise
+    # gallery_select numbering drifts and the wrong file gets posted from post 2+.
+    if count > 1:
+        clear_each = True
+
     posted = 0
     results: list[dict[str, Any]] = []
 
     for _ in range(count):
+        sync_media_queue_state(account_id, files)
         counter = get_media_selection_number(account_id)
         media_index = (counter - 1) % len(files)
         gallery_select = 1 if clear_each else counter
@@ -216,16 +271,28 @@ def run_post_reel_session(
                 "results": results,
             }
 
-        result = run_single_reel_post(
-            device,
-            serial,
-            media_dir=media_dir,
-            media_index=media_index,
-            gallery_select_number=gallery_select,
-            caption=caption,
-            clear_gallery=clear_each,
-            paste_caption=True,
-        )
+        try:
+            result = run_single_reel_post(
+                device,
+                serial,
+                media_dir=media_dir,
+                media_index=media_index,
+                gallery_select_number=gallery_select,
+                caption=caption,
+                clear_gallery=clear_each,
+                paste_caption=True,
+            )
+        except Exception as exc:
+            # Never let a reel-posting error (e.g. an adb timeout while clearing
+            # the gallery) crash the whole bot — fail this run gracefully so the
+            # session continues on to its other jobs (feed, followers, etc.).
+            logger.error("Reel posting aborted for %s: %s", account_id, exc)
+            return {
+                "success": False,
+                "message": f"Reel posting error: {exc}",
+                "posted": posted,
+                "results": results,
+            }
         results.append(result)
         if not result.get("success"):
             return {
@@ -238,6 +305,15 @@ def run_post_reel_session(
         posted += 1
         if posted < count:
             random_sleep(3, 6, modulable=False)
+
+    # All reels submitted — land on Home and wait for Instagram to finish the
+    # background uploads before the session moves on (closing too early can drop
+    # a post). Non-fatal: a timeout here still counts the reels as posted.
+    if posted > 0:
+        try:
+            wait_for_uploads_to_finish(device)
+        except Exception as exc:
+            logger.warning("Upload-completion wait skipped for %s: %s", account_id, exc)
 
     return {
         "success": True,

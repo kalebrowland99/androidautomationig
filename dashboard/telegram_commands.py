@@ -43,6 +43,8 @@ class TelegramAccount:
     username: str
     chat_id: str
     status_commands: bool = True
+    ai_assistant: bool = True
+    ai_model: str = ""
 
 
 @dataclass
@@ -158,11 +160,14 @@ def _recent_dashboard_logs(account_id: str, *, max_lines: int = 6) -> list[str]:
 
 def _format_account_status(account: TelegramAccount) -> str:
     username = account.username or account.account_id
+    # The live process check is the source of truth. live_progress.json can be
+    # left with running=true by a bot that crashed / was killed, so we must NOT
+    # trust its "running" flag on its own (that caused stale "running for 47h").
     running = _account_running(account.account_id)
     live = load_live_progress(username) or load_live_progress(account.account_id)
     lines: list[str] = []
 
-    if running or (live and live.get("running")):
+    if running:
         elapsed = _format_elapsed(
             (live or {}).get("session_started_at") or (live or {}).get("updated_at")
         )
@@ -259,15 +264,114 @@ def _build_status_reply(accounts: list[TelegramAccount], account_hint: Optional[
     )
 
 
-def _build_help_reply() -> str:
+def _build_help_reply(ai_enabled: bool = False) -> str:
+    ai_line = (
+        "• Or just *ask me anything* — e.g. _how's progress?_, "
+        "_why did it stop?_, _how many follows today?_\n"
+        if ai_enabled
+        else ""
+    )
     return (
-        "*GramAddict status bot*\n\n"
+        "*GramAddict bot*\n\n"
         "Text any of these while the dashboard is running:\n"
         "• `status` or `update` — current progress\n"
         "• `status ACCOUNT` — one account only\n"
+        f"{ai_line}"
         "• `help` — this message\n\n"
         "Turn off in dashboard → Reports → *Allow Telegram status commands*."
     )
+
+
+def _detailed_log_tail(username: str, *, max_lines: int = 45) -> list[str]:
+    """Recent log lines with timestamps kept (for AI context, not chat replies)."""
+    path = LOGS_DIR / f"{username}.log"
+    if not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    picked: list[str] = []
+    for line in reversed(lines):
+        text = line.rstrip()
+        if not text.strip():
+            continue
+        # Drop the trailing "(file.py:123)" source marker to save tokens.
+        text = re.sub(r"\s*\([^)]+\)\s*$", "", text)
+        picked.append(text[:300])
+        if len(picked) >= max_lines:
+            break
+    return list(reversed(picked))
+
+
+CAPABILITIES = (
+    "This Telegram bot reports on a GramAddict Instagram-automation run driven "
+    "from a local dashboard. It can automatically like posts, follow/unfollow "
+    "accounts, watch stories, leave AI comments, send DMs, and post reels. "
+    "Telegram commands: `status`/`update` (live progress), `status <account>` "
+    "(one account), `help`. The owner can also ask free-form questions and this "
+    "assistant answers from the live status and logs below."
+)
+
+
+def _account_is_active(account: TelegramAccount) -> bool:
+    # Authoritative: only a live, verified bot process counts as active.
+    return _account_running(account.account_id)
+
+
+def _build_ai_context(accounts: list[TelegramAccount]) -> str:
+    parts: list[str] = ["=== CAPABILITIES ===", CAPABILITIES, ""]
+    parts.append("=== CURRENT STATUS ===")
+    for acct in accounts:
+        parts.append(_format_account_status(acct))
+    parts.append("")
+
+    # Include a recent-log tail for EVERY account so "show me the recent
+    # activity log" is always answerable, even for idle accounts. Running
+    # accounts get a longer tail; idle ones a shorter one to keep the prompt
+    # small. Line counts scale down when many accounts share this chat.
+    active_lines = 45 if len(accounts) <= 3 else 25
+    idle_lines = 12 if len(accounts) <= 6 else 8
+    multi = len(accounts) > 1
+    parts.append("=== RECENT ACTIVITY LOG (oldest first, newest last) ===")
+    for acct in accounts:
+        username = acct.username or acct.account_id
+        max_lines = active_lines if _account_is_active(acct) else idle_lines
+        log_lines = _detailed_log_tail(
+            username, max_lines=max_lines
+        ) or _recent_dashboard_logs(acct.account_id, max_lines=max_lines)
+        if multi:
+            parts.append(f"-- @{username} --")
+        parts.extend(log_lines or ["(no recent log lines)"])
+    return "\n".join(parts)
+
+
+def _build_ai_reply(
+    accounts: list[TelegramAccount], question: str
+) -> Optional[str]:
+    """Answer a free-form question via the LLM. None if AI is unavailable."""
+    from dashboard import telegram_ai
+
+    api_key = telegram_ai.resolve_openai_key([a.account_id for a in accounts])
+    if not api_key:
+        return None
+    model = next((a.ai_model for a in accounts if a.ai_model), "")
+    context = _build_ai_context(accounts)
+    return telegram_ai.answer_question(
+        question, context, api_key, model or telegram_ai.DEFAULT_AI_MODEL
+    )
+
+
+def _send_chat_action(token: str, chat_id: str, action: str = "typing") -> None:
+    """Best-effort 'typing…' indicator while the AI thinks."""
+    try:
+        requests.get(
+            f"https://api.telegram.org/bot{token}/sendChatAction",
+            params={"chat_id": chat_id, "action": action},
+            timeout=5,
+        )
+    except Exception:
+        pass
 
 
 def discover_telegram_listeners() -> list[TelegramBotListener]:
@@ -286,6 +390,8 @@ def discover_telegram_listeners() -> list[TelegramBotListener]:
         config = _load_yaml(folder / "config.yml")
         username = str(config.get("username") or account_id).strip()
         status_commands = tg.get("telegram-status-commands", True) is not False
+        ai_assistant = tg.get("telegram-ai-assistant", True) is not False
+        ai_model = str(tg.get("telegram-ai-model") or "").strip()
         listener = by_token.setdefault(token, TelegramBotListener(token=token))
         listener.accounts.append(
             TelegramAccount(
@@ -293,6 +399,8 @@ def discover_telegram_listeners() -> list[TelegramBotListener]:
                 username=username,
                 chat_id=chat_id,
                 status_commands=status_commands,
+                ai_assistant=ai_assistant,
+                ai_model=ai_model,
             )
         )
     return list(by_token.values())
@@ -312,10 +420,24 @@ def _handle_message(listener: TelegramBotListener, message: dict[str, Any]) -> N
     if not matching:
         return
 
+    ai_enabled = any(acct.ai_assistant for acct in matching)
+
     if command in HELP_WORDS:
-        reply = _build_help_reply()
+        reply = _build_help_reply(ai_enabled=ai_enabled)
     elif command in STATUS_WORDS:
         reply = _build_status_reply(matching, arg)
+    elif ai_enabled:
+        # Free-form question → answer with the LLM using live status + logs.
+        _send_chat_action(listener.token, chat_id, "typing")
+        reply = _build_ai_reply(matching, text.strip())
+        if reply is None:
+            reply = (
+                "I couldn't reach the AI assistant just now. Add an "
+                "`openai-api-key` (in the account's follow_vision.yml or "
+                "post_reel.yml) to enable questions.\n\n"
+                "Meanwhile, text `status` for live progress or `help` for "
+                "commands."
+            )
     else:
         return
 

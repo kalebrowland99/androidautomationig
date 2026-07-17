@@ -8,7 +8,8 @@ from atomicwrites import atomic_write
 from colorama import Fore
 
 from GramAddict.core.device_facade import Direction, Timeout
-from GramAddict.core.interaction import like_all_profile_stories
+from GramAddict.core.interaction import like_all_profile_stories, register_daily_story_account
+from GramAddict.core.story_likes_log import append_story_likes_log, backfill_story_checks_from_todays_log
 from GramAddict.core.navigation import (
     nav_to_blogger,
     nav_to_feed,
@@ -18,10 +19,15 @@ from GramAddict.core.navigation import (
 from GramAddict.core.resources import ClassName
 from GramAddict.core.storage import FollowingStatus
 from GramAddict.core.utils import (
+    EmptyList,
+    check_instagram_rate_limit,
     get_value,
     inspect_current_view,
+    navigate_to_profile_via_url,
     random_choice,
     random_sleep,
+    remove_usernames_from_list_file,
+    skip_first_row_enabled,
 )
 from GramAddict.core.views import (
     FollowingView,
@@ -206,7 +212,9 @@ def interact(
         number_of_liked,
         number_of_watched,
         number_of_comments,
-    ) = interaction(device, username=username, can_follow=can_follow)
+    ) = interaction(
+        device, username=username, can_follow=can_follow, storage=storage
+    )
 
     add_interacted_user = partial(
         storage.add_interacted_user,
@@ -416,8 +424,6 @@ def handle_blogger_from_file(
 
 def handle_daily_story_likes_from_file(self, device, parameter_passed, storage):
     """Visit each username in the list and like all new stories."""
-    current_job = "daily-story-likes"
-    need_to_refresh = True
 
     filename: str = os.path.join(storage.account_path, parameter_passed.split(" ")[0])
     try:
@@ -438,16 +444,45 @@ def handle_daily_story_likes_from_file(self, device, parameter_passed, storage):
     len_usernames = len(usernames)
     if len_usernames < amount_of_users:
         amount_of_users = len_usernames
+    list_set = {u.strip().lstrip("@") for u in usernames if u.strip()}
+    backfilled = backfill_story_checks_from_todays_log(
+        storage,
+        storage.my_username,
+        self.session_state.id,
+        list_usernames=list_set,
+    )
+    if backfilled:
+        logger.info(
+            f"Daily story likes: restored {backfilled} account(s) checked earlier today from log."
+        )
+    already_today = storage.count_story_checks_today_in_list(usernames)
+    remaining = max(0, amount_of_users - already_today)
     logger.info(
-        f"Daily story likes: {len_usernames} entries in {filename}, processing up to {amount_of_users}."
+        f"Daily story likes: {len_usernames} entries in {filename}, "
+        f"{already_today} already checked today, up to {remaining} remaining "
+        f"(daily cap {amount_of_users})."
+    )
+    append_story_likes_log(
+        storage.my_username,
+        f"Session start — {already_today} done today, {remaining} remaining (cap {amount_of_users}).",
     )
     if amount_of_users <= 0:
         logger.info("Daily story likes limit is 0 — skipping.")
+        append_story_likes_log(storage.my_username, "Skipped — limit is 0.")
+        return
+    if remaining <= 0:
+        logger.info("Daily story likes quota already met for today — skipping.")
+        append_story_likes_log(
+            storage.my_username,
+            f"Already completed today's batch ({already_today}/{amount_of_users}).",
+        )
         return
 
-    not_found = []
+    removed_usernames = set()
     processed_users = 0
-    reinteract_hours = get_value(self.args.can_reinteract_after, None, 24)
+    self.session_state.daily_story_likes_limit = amount_of_users
+    self.session_state.totalDailyStoryAccounts = already_today
+    self.session_state._publish_live_progress()
 
     try:
         for line, username_raw in enumerate(usernames, start=1):
@@ -455,27 +490,33 @@ def handle_daily_story_likes_from_file(self, device, parameter_passed, storage):
             if not username:
                 continue
 
+            check_instagram_rate_limit(device)
+
+            if storage.story_checked_today(username):
+                logger.debug(f"@{username}: already checked today — skip.")
+                continue
+
             if storage.is_user_in_blacklist(username):
                 logger.info(f"@{username} is in blacklist. Skip.")
+                append_story_likes_log(storage.my_username, f"@{username}: blacklist — skip.")
                 continue
 
-            interacted, interacted_when = storage.check_user_was_interacted(username)
-            if interacted:
-                can_reinteract = storage.can_be_reinteract(interacted_when, reinteract_hours)
-                logger.info(
-                    f"@{username}: last story check {interacted_when:%Y/%m/%d %I:%M:%S %p}. "
-                    f"{'Checking again now' if can_reinteract else 'Skip (already checked today)'}"
+            opened, account_missing = navigate_to_profile_via_url(
+                device, username, fast=True
+            )
+            if account_missing:
+                removed_usernames.add(username)
+                append_story_likes_log(
+                    storage.my_username,
+                    f"@{username}: account not found — removed from list.",
                 )
-                if not can_reinteract:
-                    continue
-
-            if need_to_refresh:
-                search_view = TabBarView(device).navigateToSearch()
-            if not search_view.navigate_to_target(username, current_job):
-                not_found.append(username_raw)
-                need_to_refresh = True
                 continue
-            need_to_refresh = False
+            if not opened:
+                append_story_likes_log(
+                    storage.my_username,
+                    f"@{username}: could not open profile — skip (will retry later).",
+                )
+                continue
 
             profile_view = ProfileView(device, is_own_profile=False)
             liked = like_all_profile_stories(
@@ -484,40 +525,61 @@ def handle_daily_story_likes_from_file(self, device, parameter_passed, storage):
                 username,
                 self.args,
                 self.session_state,
-                require_unviewed=True,
+                always_like_stories=True,
+                daily_story_likes=True,
             )
-            storage.add_interacted_user(username, self.session_state.id)
             if liked:
                 logger.info(
                     f"@{username}: liked {liked} story segment(s).",
                     extra={"color": f"{Fore.GREEN}"},
                 )
-            device.back()
+                append_story_likes_log(
+                    storage.my_username,
+                    f"@{username}: liked {liked} story segment(s).",
+                )
+            else:
+                append_story_likes_log(
+                    storage.my_username,
+                    f"@{username}: checked — no story or like failed.",
+                )
+            storage.record_story_check(username, self.session_state.id)
+            # Next account opens via deep link — skip back() to avoid an extra
+            # blank transition between profiles.
             processed_users += 1
+            register_daily_story_account(self.session_state)
 
-            if self.session_state.check_limit(
-                limit_type=self.session_state.Limit.WATCHES
-            ):
-                logger.info("Story watch limit reached.")
-                break
-            if processed_users >= amount_of_users:
+            if processed_users >= remaining:
                 logger.info(
-                    f"{processed_users} accounts checked for stories — next job."
+                    f"{processed_users} new account(s) checked for stories this run "
+                    f"({already_today + processed_users}/{amount_of_users} today) — next job."
+                )
+                append_story_likes_log(
+                    storage.my_username,
+                    f"Finished batch — {already_today + processed_users}/{amount_of_users} checked today.",
                 )
                 break
     finally:
-        if not_found:
-            with open(
-                f"{os.path.splitext(filename)[0]}_not_found.txt",
-                mode="a+",
-                encoding="utf-8",
-            ) as f:
-                f.writelines(not_found)
+        if removed_usernames:
+            removed_count = remove_usernames_from_list_file(filename, removed_usernames)
+            logger.info(
+                f"Removed {removed_count} missing account(s) from {filename}."
+            )
+            append_story_likes_log(
+                storage.my_username,
+                f"Removed {removed_count} missing account(s) from story list.",
+            )
         if self.args.delete_interacted_users and len_usernames != 0:
             with atomic_write(filename, overwrite=True, encoding="utf-8") as f:
                 f.writelines(usernames[line:])
 
     logger.info(f"Daily story likes from {filename} completed.")
+    append_story_likes_log(
+        storage.my_username,
+        f"Job complete — {already_today + processed_users}/{amount_of_users} checked today "
+        f"({processed_users} this run).",
+    )
+    self.session_state.daily_story_likes_limit = None
+    self.session_state._publish_live_progress()
 
 
 def do_unfollow_from_list(device, username, on_following_list):
@@ -546,23 +608,11 @@ def handle_likers(
     interaction,
     is_follow_limit_reached,
 ):
-    skip_top = max(
-        0,
-        int(
-            get_value(
-                getattr(self.args, "skip_top_profile_posts", None)
-                or getattr(self.args, "skip_pinned_posts", None)
-                or "3",
-                None,
-                3,
-            )
-            or 0
-        ),
-    )
+    skip_first_row = skip_first_row_enabled(self.args)
     if (
         current_job == "blogger-post-likers"
         and not nav_to_post_likers(
-            device, target, session_state.my_username, skip_top_profile_posts=skip_top
+            device, target, session_state.my_username, skip_first_row=skip_first_row
         )
         or current_job != "blogger-post-likers"
         and not nav_to_hashtag_or_place(device, target, current_job)
@@ -630,7 +680,14 @@ def handle_likers(
             if user_container is None:
                 logger.warning("Likers list didn't load :(")
                 return
-            row_height, n_users = inspect_current_view(user_container)
+            try:
+                row_height, n_users = inspect_current_view(user_container)
+            except EmptyList:
+                logger.info(
+                    "No likers visible on screen — nothing to iterate.",
+                    extra={"color": f"{Fore.GREEN}"},
+                )
+                return
             try:
                 for item in user_container:
                     cur_row_height = item.get_height()
@@ -1047,7 +1104,14 @@ def iterate_over_followers(
         user_list = device.find(
             resourceIdMatches=self.ResourceID.USER_LIST_CONTAINER,
         )
-        row_height, n_users = inspect_current_view(user_list)
+        try:
+            row_height, n_users = inspect_current_view(user_list)
+        except EmptyList:
+            logger.info(
+                "No followers visible on screen — reached the end of the list.",
+                extra={"color": f"{Fore.GREEN}"},
+            )
+            return
         suggested_top = suggested_for_you_top(device) if not is_myself else None
         try:
             for item in user_list:

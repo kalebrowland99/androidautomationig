@@ -43,6 +43,10 @@ FIELD_COMMENT_PHOTOS = "comment_photos"
 FIELD_COMMENT_VIDEOS = "comment_videos"
 FIELD_COMMENT_CAROUSELS = "comment_carousels"
 FIELD_BLACKLIST_WORDS = "blacklist_words"
+# Field-specific blacklists so words can be targeted per profile field.
+FIELD_BLACKLIST_WORDS_BIO = "blacklist_words_bio"
+FIELD_BLACKLIST_WORDS_NAME = "blacklist_words_name"
+FIELD_BLACKLIST_WORDS_HANDLE = "blacklist_words_handle"
 FIELD_MANDATORY_WORDS = "mandatory_words"
 FIELD_SPECIFIC_ALPHABET = "specific_alphabet"
 FIELD_BIO_LANGUAGE = "biography_language"
@@ -230,6 +234,15 @@ class Filter:
             field_min_potency_ratio = self.conditions.get(FIELD_MIN_POTENCY_RATIO, 0)
             field_max_potency_ratio = self.conditions.get(FIELD_MAX_POTENCY_RATIO, 999)
             field_blacklist_words = self.conditions.get(FIELD_BLACKLIST_WORDS, [])
+            field_blacklist_words_bio = self.conditions.get(
+                FIELD_BLACKLIST_WORDS_BIO, []
+            )
+            field_blacklist_words_name = self.conditions.get(
+                FIELD_BLACKLIST_WORDS_NAME, []
+            )
+            field_blacklist_words_handle = self.conditions.get(
+                FIELD_BLACKLIST_WORDS_HANDLE, []
+            )
             field_mandatory_words = self.conditions.get(FIELD_MANDATORY_WORDS, [])
             field_specific_alphabet = self.conditions.get(FIELD_SPECIFIC_ALPHABET)
             field_bio_language = self.conditions.get(FIELD_BIO_LANGUAGE)
@@ -435,6 +448,50 @@ class Filter:
             .lower()
             .split()
         )
+        cleaned_fullname = (profile_data.fullname or "").lower()
+        handle = (username or "").lower()
+
+        def _matched_blacklist_word(words, haystack: str, *, substring: bool):
+            """Return the first blacklisted word found in `haystack`.
+
+            Bio and name use whole-word matching so a short word doesn't match
+            inside a longer one (e.g. "link" won't hit "linkedin"). The @handle
+            has no spaces to break on, so it matches as a substring instead.
+            """
+            for raw in words or []:
+                word = str(raw).lower().strip()
+                if not word:
+                    continue
+                if substring:
+                    if word in haystack:
+                        return raw
+                elif re.compile(
+                    r"\b({0})\b".format(re.escape(word)), flags=re.IGNORECASE
+                ).search(haystack):
+                    return raw
+            return None
+
+        # Field-targeted + combined blacklists. `blacklist_words` scans bio, name
+        # and @handle together (backward compatible); the *_bio / *_name /
+        # *_handle lists let you target a single field.
+        blacklist_checks = [
+            ("biography", field_blacklist_words, cleaned_biography, False),
+            ("name", field_blacklist_words, cleaned_fullname, False),
+            ("@handle", field_blacklist_words, handle, True),
+            ("biography", field_blacklist_words_bio, cleaned_biography, False),
+            ("name", field_blacklist_words_name, cleaned_fullname, False),
+            ("@handle", field_blacklist_words_handle, handle, True),
+        ]
+        for where, words, haystack, substring in blacklist_checks:
+            hit = _matched_blacklist_word(words, haystack, substring=substring)
+            if hit is not None:
+                logger.info(
+                    f"@{username} found a blacklisted word '{hit}' in {where}, skip.",
+                    extra={"color": f"{Fore.CYAN}"},
+                )
+                return profile_data, self.return_check_profile(
+                    username, profile_data, SkipReason.BLACKLISTED_WORD
+                )
 
         if not cleaned_biography and (
             len(field_mandatory_words) > 0
@@ -449,31 +506,12 @@ class Filter:
                 username, profile_data, SkipReason.BIOGRAPHY_IS_EMPTY
             )
         if (
-            len(field_blacklist_words) > 0
-            or len(field_mandatory_words) > 0
+            len(field_mandatory_words) > 0
             or field_specific_alphabet is not None
             or field_bio_language is not None
             or field_bio_banned_language is not None
         ):
             logger.debug("Pulling biography...")
-            if len(field_blacklist_words) > 0:
-                logger.debug(
-                    "Checking if account has blacklisted words in biography..."
-                )
-                # If we found a blacklist word return False
-                for w in field_blacklist_words:
-                    blacklist_words = re.compile(
-                        r"\b({0})\b".format(w), flags=re.IGNORECASE
-                    ).search(cleaned_biography)
-                    if blacklist_words is not None:
-                        logger.info(
-                            f"@{username} found a blacklisted word '{w}' in biography, skip.",
-                            extra={"color": f"{Fore.CYAN}"},
-                        )
-                        return profile_data, self.return_check_profile(
-                            username, profile_data, SkipReason.BLACKLISTED_WORD
-                        )
-
             if len(field_mandatory_words) > 0:
                 logger.debug("Checking if account has mandatory words in biography...")
                 mandatory_words = [

@@ -119,7 +119,26 @@ class ResourceID:
         self.PROFILE_HEADER_FAMILIAR_FOLLOWING_LABEL = (
             f"{APP_ID}:id/profile_header_familiar_following_label"
         )
-        self.PROFILE_HEADER_FULL_NAME = f"{APP_ID}:id/profile_header_full_name"
+        # Clickable stat containers of the "familiar" header variant. Their
+        # content-desc reliably encodes count + label glued together
+        # (e.g. "2posts", "2followers", "23following"), so they're a sturdy
+        # fallback when the individual value/label text views are slow to render.
+        self.PROFILE_HEADER_POST_COUNT_FRONT_FAMILIAR = (
+            f"{APP_ID}:id/profile_header_post_count_front_familiar"
+        )
+        self.PROFILE_HEADER_FOLLOWERS_STACKED_FAMILIAR = (
+            f"{APP_ID}:id/profile_header_followers_stacked_familiar"
+        )
+        self.PROFILE_HEADER_FOLLOWING_STACKED_FAMILIAR = (
+            f"{APP_ID}:id/profile_header_following_stacked_familiar"
+        )
+        # Some layouts render the display name as `profile_header_full_name`,
+        # newer ones (verified / vanity handle) as
+        # `profile_header_full_name_above_vanity`. Match either.
+        self.PROFILE_HEADER_FULL_NAME = (
+            f"{APP_ID}:id/profile_header_full_name"
+            f"|{APP_ID}:id/profile_header_full_name_above_vanity"
+        )
         self.PROFILE_HEADER_WEBSITE = f"{APP_ID}:id/profile_header_website"
         self.PROFILE_HEADER_AVATAR_CONTAINER_TOP_LEFT_STUB = (
             f"{APP_ID}:id/profile_header_avatar_container_top_left_stub"
@@ -197,6 +216,9 @@ class ResourceID:
         )
         self.ROW_SEARCH_EDIT_TEXT = f"{APP_ID}:id/row_search_edit_text"
         self.ROW_SEARCH_USER_USERNAME = f"{APP_ID}:id/row_search_user_username"
+        self.ROW_SEARCH_KEYWORD_TITLE = f"{APP_ID}:id/row_search_keyword_title"
+        self.ROW_SEARCH_KEYWORD_SUBTITLE = f"{APP_ID}:id/row_search_keyword_subtitle"
+        self.ROW_SEARCH_AVATAR_WITH_RING = f"{APP_ID}:id/row_search_avatar_with_ring"
         self.ROW_SIMPLE_TEXT_TEXTVIEW = f"{APP_ID}:id/row_simple_text_textview"
         self.ROW_THREAD_COMPOSER_BUTTON_SEND = (
             f"{APP_ID}:id/row_thread_composer_button_send|{APP_ID}:id/row_thread_composer_send_button_icon"

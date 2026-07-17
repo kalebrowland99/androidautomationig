@@ -11,6 +11,7 @@ from GramAddict.core.resources import ResourceID as resources
 from GramAddict.core.scroll_end_detector import ScrollEndDetector
 from GramAddict.core.storage import FollowingStatus
 from GramAddict.core.utils import (
+    EmptyList,
     get_value,
     inspect_current_view,
     random_sleep,
@@ -300,7 +301,11 @@ class ActionUnfollowFollowers(Plugin):
             user_list = device.find(
                 resourceIdMatches=self.ResourceID.USER_LIST_CONTAINER,
             )
-            row_height, n_users = inspect_current_view(user_list)
+            try:
+                row_height, n_users = inspect_current_view(user_list)
+            except EmptyList:
+                logger.info("No followings visible on screen — nothing to iterate.")
+                return
             for item in user_list:
                 cur_row_height = item.get_height()
                 if cur_row_height < row_height:

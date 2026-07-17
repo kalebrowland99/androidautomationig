@@ -14,11 +14,14 @@ from GramAddict.core.report import print_full_report
 from GramAddict.core.utils import (
     ActionBlockedError,
     check_if_crash_popup_is_there,
+    check_instagram_rate_limit,
     close_instagram,
+    InstagramRateLimitError,
     open_instagram,
     random_sleep,
     save_crash,
     stop_bot,
+    take_rate_limit_break,
 )
 from GramAddict.core.views import TabBarView
 from GramAddict.plugins.telegram import send_telegram_alert
@@ -100,6 +103,11 @@ def run_safely(device, device_id, sessions, session_state, screen_record, config
                 )
 
             except ActionBlockedError as e:
+                if isinstance(e, InstagramRateLimitError):
+                    logger.warning(str(e))
+                    print_full_report(sessions, configs.args.scrape_to_file)
+                    sessions.persist(directory=session_state.my_username)
+                    raise
                 _notify_fatal_error(
                     session_state,
                     configs,
@@ -184,7 +192,10 @@ def restart(
             stop_bot(device, sessions, session_state)
         logger.info("Something unexpected happened. Let's try again.")
     close_instagram(device)
-    check_if_crash_popup_is_there(device)
+    try:
+        check_if_crash_popup_is_there(device)
+    except InstagramRateLimitError:
+        raise
     random_sleep()
     if not open_instagram(device):
         print_full_report(sessions, configs.args.scrape_to_file)

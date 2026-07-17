@@ -28,15 +28,28 @@ def write_live_progress(
     *,
     running: bool = True,
     current_job: Optional[str] = None,
+    sleeping: bool = False,
+    next_session_at: Optional[str] = None,
 ) -> None:
     if not username:
         return
     path = _progress_path(username)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Per-action writes don't know the job name; keep the last one we recorded
+    # so the label doesn't blank out between the coarse per-job writes.
+    if current_job is None:
+        try:
+            prev = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(prev, dict):
+                current_job = prev.get("current_job")
+        except (OSError, json.JSONDecodeError):
+            pass
     payload: dict[str, Any] = {
         "username": username,
         "running": running,
         "current_job": current_job,
+        "sleeping": bool(sleeping),
+        "next_session_at": next_session_at,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "session_started_at": (
             session_state.startTime.isoformat(timespec="seconds")
@@ -47,6 +60,9 @@ def write_live_progress(
         "total_followed": sum(session_state.totalFollowed.values()),
         "total_unfollowed": session_state.totalUnfollowed,
         "total_watched": session_state.totalWatched,
+        "total_story_likes": session_state.totalStoryLikes,
+        "total_daily_story_accounts": session_state.totalDailyStoryAccounts,
+        "daily_story_likes_limit": session_state.daily_story_likes_limit,
         "total_comments": session_state.totalComments,
         "total_pm": session_state.totalPm,
         "total_interactions": sum(session_state.totalInteractions.values()),

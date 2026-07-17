@@ -1,4 +1,4 @@
 # One Instagram username per line (no @).
 # Used by the Daily story likes job on the Jobs tab.
-# The bot visits each account once per day (set can-reinteract-after: 24),
-# likes all segments in any new story, then moves to the next name.
+# The bot visits each name every session, likes any new story segments, then moves on.
+# Artists who pass follow vision during other jobs are appended here automatically.
