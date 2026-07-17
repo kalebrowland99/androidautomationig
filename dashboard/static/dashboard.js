@@ -769,6 +769,7 @@ function setAccountTab(tab) {
   if (prev !== tab) flushAutosave();
   setActiveSaveField(null);
   if (tab === "posting") loadPostReelMedia();
+  if (tab === "limits") loadRateLimitHistory();
 }
 
 function bindAccountTabs() {
@@ -4217,12 +4218,113 @@ function toggleSessionEstimate() {
   applySessionEstimateCollapse();
 }
 
-function escapeHtml(text) {
-  return String(text || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+function formatRateLimitWhen(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
+function formatRateLimitJob(job) {
+  if (!job) return "—";
+  return String(job).replace(/-/g, " ");
+}
+
+function renderRateLimitCell(val) {
+  if (val == null || val === "") return "—";
+  return escapeHtml(String(val));
+}
+
+function renderRateLimitHistory(data) {
+  const panel = $("account-rate-limits");
+  const summaryEl = $("account-rate-limits-summary");
+  const tableWrap = $("account-rate-limits-table-wrap");
+  if (!panel || !summaryEl || !tableWrap) return;
+
+  const events = data?.events || [];
+  panel.classList.toggle("hidden", !gaCurrentAccountId);
+
+  if (!events.length) {
+    summaryEl.textContent =
+      "No “Try Again Later” events recorded yet. The next time Instagram rate-limits this account, counts are saved here automatically.";
+    tableWrap.innerHTML = "";
+    return;
+  }
+
+  const latest = data.summary || {};
+  const daily = latest.daily_story_accounts;
+  const parts = [];
+  if (daily != null) parts.push(`${daily} daily story accounts`);
+  if (latest.story_likes != null) parts.push(`${latest.story_likes} story likes`);
+  if (latest.follows != null) parts.push(`${latest.follows} follows`);
+  if (latest.likes != null) parts.push(`${latest.likes} likes`);
+  if (latest.comments != null) parts.push(`${latest.comments} comments`);
+  summaryEl.textContent = `Latest limit (${formatRateLimitWhen(latest.at)}${
+    latest.job ? ` during ${formatRateLimitJob(latest.job)}` : ""
+  }): ${parts.join(" · ") || "counts recorded"}.`;
+
+  const rows = events
+    .map((ev) => {
+      const c = ev.counts || {};
+      const dailyCount =
+        c.daily_story_accounts_today ??
+        c.daily_story_accounts_live ??
+        c.daily_story_accounts_session;
+      return `<tr>
+        <td>${escapeHtml(formatRateLimitWhen(ev.at))}</td>
+        <td>${escapeHtml(formatRateLimitJob(ev.job))}</td>
+        <td>${renderRateLimitCell(dailyCount)}</td>
+        <td>${renderRateLimitCell(c.story_likes)}</td>
+        <td>${renderRateLimitCell(c.follows)}</td>
+        <td>${renderRateLimitCell(c.likes)}</td>
+        <td>${renderRateLimitCell(c.comments)}</td>
+        <td>${renderRateLimitCell(c.interactions)}</td>
+        <td>${renderRateLimitCell(ev.break_minutes)}m</td>
+      </tr>`;
+    })
+    .join("");
+
+  tableWrap.innerHTML = `<table class="account-rate-limits-table">
+    <thead>
+      <tr>
+        <th>When</th>
+        <th>Job</th>
+        <th>Daily story accts</th>
+        <th>Story likes</th>
+        <th>Follows</th>
+        <th>Likes</th>
+        <th>Comments</th>
+        <th>Interactions</th>
+        <th>Pause</th>
+      </tr>
+    </thead>
+    <tbody>${rows}</tbody>
+  </table>`;
+}
+
+async function loadRateLimitHistory() {
+  const panel = $("account-rate-limits");
+  if (!panel || !gaCurrentAccountId) {
+    panel?.classList.add("hidden");
+    return;
+  }
+  try {
+    const res = await fetch(
+      `/api/gramaddict/accounts/${encodeURIComponent(gaCurrentAccountId)}/rate-limits`
+    );
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    renderRateLimitHistory(data);
+  } catch (err) {
+    const summaryEl = $("account-rate-limits-summary");
+    if (summaryEl) summaryEl.textContent = `Could not load rate limit history: ${err.message}`;
+    panel.classList.remove("hidden");
+  }
 }
 
 function renderSessionOutcomes(estimate) {
@@ -4932,6 +5034,7 @@ async function onGaAccountChange() {
     }
     await loadAccountFiles();
     renderSessionEstimate(data.estimate);
+    loadRateLimitHistory();
     setGaStatus("");
     updateContextStrip();
     await loadSettingsTemplateSources();

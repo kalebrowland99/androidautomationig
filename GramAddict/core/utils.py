@@ -523,14 +523,27 @@ def check_instagram_rate_limit(device, *, raise_on_limit: bool = True) -> bool:
 def take_rate_limit_break(device, session_state, sessions, configs) -> None:
     """Close Instagram and sleep until it is safe to resume automation."""
     from GramAddict.core.live_progress import write_live_progress
+    from GramAddict.core.rate_limit_history import record_rate_limit_event
     from GramAddict.plugins.telegram import send_telegram_alert
 
     minutes = int(get_value(getattr(configs.args, "rate_limit_break", None), None, 720))
     username = session_state.my_username or getattr(configs.args, "username", None)
+    record_rate_limit_event(
+        username,
+        session_state,
+        break_minutes=minutes,
+    )
+    counts = session_state.totalDailyStoryAccounts
     send_telegram_alert(
         username,
         "Instagram rate limit",
-        f"'Try Again Later' detected. Pausing automation for {minutes} minutes.",
+        (
+            f"'Try Again Later' detected. Pausing automation for {minutes} minutes. "
+            f"Session counts — daily story accounts: {counts}, "
+            f"story likes: {session_state.totalStoryLikes}, "
+            f"follows: {sum(session_state.totalFollowed.values())}, "
+            f"likes: {session_state.totalLikes}."
+        ),
     )
     close_instagram(device)
     next_session_at = datetime.now() + timedelta(minutes=minutes)

@@ -360,6 +360,17 @@
                             </div>
 
                             <div id="account-panel-limits" class="account-panel hidden">
+                                <div id="account-rate-limits" class="account-rate-limits hidden" aria-live="polite">
+                                    <div class="account-rate-limits-head">
+                                        <div>
+                                            <h3 class="account-rate-limits-title">Instagram rate limits</h3>
+                                            <p class="account-rate-limits-hint">When Instagram shows “Try Again Later”, the bot records your interaction counts at that moment so you can see what triggered the limit.</p>
+                                        </div>
+                                        <button type="button" class="btn-ghost btn-sm" id="btn-refresh-rate-limits" onclick="loadRateLimitHistory()">Refresh</button>
+                                    </div>
+                                    <p id="account-rate-limits-summary" class="account-rate-limits-summary"></p>
+                                    <div id="account-rate-limits-table-wrap" class="account-rate-limits-table-wrap"></div>
+                                </div>
                                 <div id="ga-form-limits" class="ga-form-sections"></div>
                             </div>
 

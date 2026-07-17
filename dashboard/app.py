@@ -844,6 +844,16 @@ async def api_gramaddict_story_likes_log(
     )
 
 
+@app.get("/api/gramaddict/accounts/{account_id}/rate-limits")
+async def api_gramaddict_rate_limits(
+    account_id: str, limit: int = 20
+) -> dict[str, Any]:
+    limit = max(1, min(limit, 50))
+    return await asyncio.to_thread(
+        gramaddict_config.read_rate_limit_history, account_id, max_events=limit
+    )
+
+
 @app.post("/api/gramaddict/accounts/{account_id}/run")
 async def api_gramaddict_run_bot(
     account_id: str,

@@ -1487,6 +1487,19 @@ def _extract_story_likes_lines(lines: list[str]) -> list[str]:
     return out
 
 
+def read_rate_limit_history(account_id: str, *, max_events: int = 20) -> dict[str, Any]:
+    """Return persisted Instagram 'Try Again Later' events for an account."""
+    from GramAddict.core.rate_limit_history import load_rate_limit_history
+
+    username = _account_username(account_id)
+    data = load_rate_limit_history(username, max_events=max_events)
+    return {
+        "account_id": account_id,
+        "username": username,
+        **data,
+    }
+
+
 def read_story_likes_log(account_id: str, *, max_lines: int = 400) -> dict[str, Any]:
     """Tail the dedicated story-likes log, with fallback to filtered main log."""
     username = _account_username(account_id)
