@@ -18,30 +18,57 @@ ACCOUNTS = Path("accounts")
 FOLLOW_VISION_FILENAME = "follow_vision.yml"
 FOLLOW_VISION_PROMPTS_FILENAME = "follow_vision_prompts.yml"
 POST_REEL_FILENAME = "post_reel.yml"
+CONFIG_FILENAME = "config.yml"
 FOUND_VIDEOGRAPHERS_FILENAME = "found_videographers_tn.txt"
+FOUND_WEDDING_VENDORS_FILENAME = "found_wedding_vendors.txt"
+WEDDING_VIDEOGRAPHERS_FILENAME = "wedding_videographers.txt"
 STORY_LIKES_FILENAME = "story_likes.txt"
-VIDEOGRAPHER_PHRASE = "music videographer"
+VIDEOGRAPHER_PHRASE = "tn music videographer"
+WEDDING_VENDOR_PHRASE = "tn wedding vendor"
+BLOGGER_FOLLOWERS_KEY = "blogger-followers"
+
+# Newly discovered blogger sources waiting to be handled in the current session.
+_discovered_bloggers: dict[str, list[str]] = {}
+
+_TN_LOCATION_RULES = (
+    "TENNESSEE LOCATION RULE (critical for vendor phrases only):\n"
+    "Only use a TN vendor phrase if the profile is based in Tennessee. Location is usually in the IG bio "
+    "(also check name, highlights, or on-screen text).\n"
+    "Accept: Tennessee, TN, Tenn, Mid-TN, Middle TN, East TN, West TN, 60x area codes (615/629 Nashville, "
+    "901 Memphis, 423 Chattanooga/Tri-Cities, 731 Jackson, 865 Knoxville), or TN city/metro names — "
+    "including common abbreviations/nicknames (examples: Nashville/Nash/Nashvegas/Music City, "
+    "Memphis/Mempho, Knoxville/Knox, Chattanooga/Chatt, Murfreesboro/boro, Franklin, Brentwood, "
+    "Nolensville, Spring Hill, Columbia, Clarksville, Jackson, Johnson City, Kingsport, Bristol, "
+    "Cookeville, Cleveland, Maryville, Oak Ridge, Gallatin, Hendersonville, Mt. Juliet / Mount Juliet, "
+    "Smyrna, Lebanon, Dickson, Cool Springs, Tri-Cities).\n"
+    "If the city is abbreviated or unfamiliar, reason whether it is a Tennessee city before deciding.\n"
+    "If they are a videographer/photographer but NOT in Tennessee (or location is unclear), do NOT use "
+    "a TN vendor phrase — answer \"no\" for that person (unless they match a non-vendor pass phrase below).\n"
+)
 
 DEFAULT_PROMPT_615 = (
     "You will receive two Instagram profile screenshots (top of profile, then scrolled down) "
     "and the profile biography text below. "
+    f"{_TN_LOCATION_RULES}"
     "Respond with exactly ONE of these phrases:\n"
-    "- potential musician — musician, artist, or rapper (not a videographer)\n"
-    "- music videographer — filmmaker/videographer who shoots music videos or works with musicians "
+    "- potential musician — musician, artist, or rapper (not a videographer); location can be anywhere\n"
+    "- tn music videographer — filmmaker/videographer who shoots music videos or works with musicians "
+    "AND is based in Tennessee "
     "(read bio/posts for videographer, music video, MV director, DP, cinematographer, filmmaker)\n"
-    "- no — everyone else"
+    "- no — everyone else (including non-TN videographers)"
 )
 DEFAULT_PROMPT_YLF = (
     "You will receive two Instagram profile screenshots (top of profile, then scrolled down) "
     "and the profile biography text below. "
+    f"{_TN_LOCATION_RULES}"
     "Respond with exactly ONE of these phrases:\n"
     "- potential couple — real couple, engaged person, bride or groom (partner may or may not appear "
     "in the profile), engagement or wedding content, or someone who looks like they are getting "
-    "married soon (NOT a wedding vendor or business account)\n"
-    "- wedding vendor — wedding photographer, videographer, filmmaker, cinematographer, DP, "
-    "planner, florist, DJ, venue, bridal shop, cake baker, or any business/service selling "
-    "to couples (check bio/posts for photographer, videography, wedding films, booking, packages, etc.)\n"
-    "- no — everyone else"
+    "married soon (NOT a wedding vendor or business account); location can be anywhere\n"
+    "- tn wedding vendor — Tennessee-based wedding photographer, videographer, filmmaker, or "
+    "cinematographer/DP (prefer photo/video creators; check bio/posts for photographer, videography, "
+    "wedding films, booking, packages, etc.)\n"
+    "- no — everyone else (including non-TN vendors, florists-only, venues-only, etc.)"
 )
 DEFAULT_COMMENT_PROMPT = (
     "Write one very short, casual Instagram comment aimed at a musician or artist, "
@@ -183,12 +210,24 @@ def response_is_artist_pass(text: str, batch_name: str) -> bool:
     return PASS_PHRASES.get(batch_name, "potential musician") == "potential musician"
 
 
+def _response_matches_phrase(text: str, phrase: str, *, legacy_phrases: tuple[str, ...] = ()) -> bool:
+    normalized = _normalize_response(text)
+    candidates = (phrase, *legacy_phrases)
+    for candidate in candidates:
+        if normalized == candidate or normalized.startswith(f"{candidate} "):
+            return True
+    return False
+
+
 def response_is_music_videographer(text: str) -> bool:
+    """True for TN music videographers (legacy 'music videographer' still accepted)."""
     normalized = _normalize_response(text)
     if "potential musician" in normalized:
         return False
-    return normalized == VIDEOGRAPHER_PHRASE or normalized.startswith(
-        f"{VIDEOGRAPHER_PHRASE} "
+    return _response_matches_phrase(
+        text,
+        VIDEOGRAPHER_PHRASE,
+        legacy_phrases=("music videographer",),
     )
 
 
@@ -197,14 +236,93 @@ def response_is_tn_music_videographer(text: str) -> bool:
     return response_is_music_videographer(text)
 
 
+def response_is_wedding_vendor(text: str) -> bool:
+    """True when YourLoveFilms vision classifies a TN wedding photo/video vendor."""
+    normalized = _normalize_response(text)
+    if "potential couple" in normalized:
+        return False
+    return _response_matches_phrase(
+        text,
+        WEDDING_VENDOR_PHRASE,
+        legacy_phrases=(
+            "wedding vendor",
+            "tn wedding photographer",
+            "tn wedding videographer",
+        ),
+    )
+
+
+def response_is_wedding_photo_or_video_vendor(text: str) -> bool:
+    """TN wedding photographers / videographers / filmmakers."""
+    if not response_is_wedding_vendor(text):
+        return False
+    normalized = _normalize_response(text)
+    # New dedicated phrase already means photo/video vendor in TN.
+    if normalized == WEDDING_VENDOR_PHRASE or normalized.startswith(
+        f"{WEDDING_VENDOR_PHRASE} "
+    ):
+        return True
+    keywords = (
+        "photograph",
+        "videograph",
+        "filmmaker",
+        "filmmaking",
+        "cinematograph",
+        " wedding film",
+    )
+    return any(k in normalized for k in keywords)
+
+
 def _videographer_log_enabled(settings: dict[str, Any]) -> bool:
     if "log-videographers" in settings:
         return bool(settings.get("log-videographers"))
     return bool(settings.get("log-tn-videographers", True))
 
 
-def _videographer_log_path(account_key: str) -> Path:
-    return resolve_account_dir(account_key) / FOUND_VIDEOGRAPHERS_FILENAME
+def _append_lead_log_line(
+    path: Path,
+    username: str,
+    bio: str,
+    raw_response: str,
+    *,
+    label: str,
+) -> bool:
+    """Append a deduped lead line. Returns True when a new line was written."""
+    uname = username.lstrip("@").strip()
+    if not uname:
+        return False
+    if path.is_file():
+        existing = path.read_text(encoding="utf-8").lower()
+        needle = f"@{uname.lower()}\t"
+        if needle in existing or f"\t{needle}" in existing:
+            logger.debug("%s @%s already in %s", label, uname, path.name)
+            return False
+    bio_one_line = re.sub(r"\s+", " ", (bio or "").strip())[:300]
+    ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"{ts}\t@{uname}\t{raw_response.strip()}\t{bio_one_line}\n"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(line)
+    logger.info("Logged %s @%s → %s", label, uname, path)
+    return True
+
+
+def _append_username_list_file(path: Path, username: str) -> bool:
+    uname = username.lstrip("@").strip()
+    if not uname:
+        return False
+    existing: set[str] = set()
+    if path.is_file():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if stripped and not stripped.startswith("#"):
+                existing.add(stripped.lstrip("@").casefold())
+    if uname.casefold() in existing:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"{uname}\n")
+    return True
 
 
 def log_found_videographer(
@@ -214,26 +332,31 @@ def log_found_videographer(
     raw_response: str,
 ) -> None:
     """Append a music videographer lead (deduped by username)."""
-    path = _videographer_log_path(account_key)
-    uname = username.lstrip("@").strip()
-    if not uname:
-        return
-    if path.is_file():
-        existing = path.read_text(encoding="utf-8").lower()
-        if f"@{uname.lower()}\t" in existing or f"\t@{uname.lower()}\t" in existing:
-            logger.debug("Videographer @%s already in %s", uname, path.name)
-            return
-    bio_one_line = re.sub(r"\s+", " ", (bio or "").strip())[:300]
-    ts = datetime.now(timezone.utc).astimezone().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"{ts}\t@{uname}\t{raw_response.strip()}\t{bio_one_line}\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(line)
-    logger.info(
-        "Logged music videographer @%s → %s",
-        uname,
-        path,
+    path = resolve_account_dir(account_key) / FOUND_VIDEOGRAPHERS_FILENAME
+    _append_lead_log_line(
+        path, username, bio, raw_response, label="music videographer"
     )
+
+
+def log_found_wedding_vendor(
+    account_key: str,
+    username: str,
+    bio: str,
+    raw_response: str,
+) -> None:
+    """Append a wedding photographer/videographer/vendor lead for YourLoveFilms."""
+    folder = resolve_account_dir(account_key)
+    wrote = _append_lead_log_line(
+        folder / FOUND_WEDDING_VENDORS_FILENAME,
+        username,
+        bio,
+        raw_response,
+        label="wedding vendor",
+    )
+    if wrote:
+        _append_username_list_file(
+            folder / WEDDING_VIDEOGRAPHERS_FILENAME, username
+        )
 
 
 def log_found_tn_videographer(
@@ -245,6 +368,86 @@ def log_found_tn_videographer(
 ) -> None:
     """Backward-compatible alias."""
     log_found_videographer(account_key, username, bio, raw_response)
+
+
+def _normalize_blogger_source(username: str) -> str:
+    return username.lstrip("@").strip()
+
+
+def _account_queue_key(account_key: str) -> str:
+    try:
+        return resolve_account_dir(account_key).name
+    except FileNotFoundError:
+        return str(account_key or "").strip().lower()
+
+
+def enqueue_discovered_blogger(account_key: str, username: str) -> None:
+    """Queue a source so the running blogger-followers job can handle it live."""
+    uname = _normalize_blogger_source(username)
+    if not uname:
+        return
+    key = _account_queue_key(account_key)
+    queue = _discovered_bloggers.setdefault(key, [])
+    if any(s.lstrip("@").casefold() == uname.casefold() for s in queue):
+        return
+    queue.append(uname)
+
+
+def drain_discovered_bloggers(account_key: str) -> list[str]:
+    """Return and clear newly discovered blogger sources for this account."""
+    key = _account_queue_key(account_key)
+    items = _discovered_bloggers.get(key) or []
+    _discovered_bloggers[key] = []
+    return list(items)
+
+
+def append_username_to_blogger_followers(account_key: str, username: str) -> bool:
+    """Persist username to config.yml blogger-followers and queue it for this session."""
+    uname = _normalize_blogger_source(username)
+    if not uname:
+        return False
+    folder = resolve_account_dir(account_key)
+    config_path = folder / CONFIG_FILENAME
+    data = _load_yaml(config_path) if config_path.is_file() else {}
+    if not isinstance(data, dict):
+        data = {}
+
+    current = data.get(BLOGGER_FOLLOWERS_KEY) or []
+    if isinstance(current, str):
+        current = [current]
+    if not isinstance(current, list):
+        current = []
+
+    existing = {
+        str(item).lstrip("@").strip().casefold()
+        for item in current
+        if str(item).strip()
+    }
+    if uname.casefold() in existing:
+        enqueue_discovered_blogger(account_key, uname)
+        logger.debug("@%s already in blogger-followers", uname)
+        return False
+
+    current.append(uname)
+    data[BLOGGER_FOLLOWERS_KEY] = current
+    folder.mkdir(parents=True, exist_ok=True)
+    with config_path.open("w", encoding="utf-8") as handle:
+        # Match dashboard/configargparse: scalar lists stay inline on one line.
+        yaml.dump(
+            data,
+            handle,
+            default_flow_style=None,
+            sort_keys=False,
+            allow_unicode=True,
+            width=float("inf"),
+        )
+    enqueue_discovered_blogger(account_key, uname)
+    logger.info(
+        "Added @%s to blogger-followers (live) → %s",
+        uname,
+        config_path,
+    )
+    return True
 
 
 def append_username_to_story_likes_list(account_key: str, username: str) -> bool:
@@ -439,17 +642,15 @@ def profile_passes_follow_vision(device, username: str, account_key: str) -> boo
         batch_name = str(settings.get("prompt-batch") or "615FILMS")
 
         passed, raw = analyze_profile_images(account_key, images, bio)
-        if (
-            batch_name == "615FILMS"
-            and _videographer_log_enabled(settings)
-            and response_is_music_videographer(raw)
-        ):
-            log_found_videographer(
-                account_key,
-                username,
-                bio,
-                raw,
-            )
+        if _videographer_log_enabled(settings):
+            if batch_name == "615FILMS" and response_is_music_videographer(raw):
+                log_found_videographer(account_key, username, bio, raw)
+                append_username_to_blogger_followers(account_key, username)
+            elif batch_name == "YourLoveFilms" and (
+                response_is_wedding_photo_or_video_vendor(raw)
+            ):
+                log_found_wedding_vendor(account_key, username, bio, raw)
+                append_username_to_blogger_followers(account_key, username)
         if passed:
             logger.info(
                 "Follow vision passed for @%s (%s)",

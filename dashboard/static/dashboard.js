@@ -16,6 +16,9 @@ let currentAccountTab = localStorage.getItem("accountTab") || "basics";
 
 let gaAccounts = [];
 let gaCurrentAccountId = localStorage.getItem("gaAccountId") || "";
+/** Account whose settings are currently loaded into the Account form fields.
+ *  Autosaves must target this — never a different account selected on Farm. */
+let gaFormAccountId = "";
 let gaSchema = null;
 let gaFiltersSchema = null;
 let gaTelegramSchema = null;
@@ -56,6 +59,10 @@ function endGaFormLoad() {
   }
 }
 
+function formAccountId() {
+  return gaFormAccountId || gaCurrentAccountId || "";
+}
+
 function scheduleAutosave(kind, fn, delay = 900) {
   autosavePending[kind] = fn;
   clearTimeout(autosaveTimers[kind]);
@@ -80,21 +87,22 @@ async function flushAutosave() {
 }
 
 async function saveAllBeforeRun() {
-  if (!gaCurrentAccountId) return;
+  const accountId = formAccountId();
+  if (!accountId) return;
   syncAllCommentsListWidgets();
   await flushAutosave();
-  await saveGaConfig({ quiet: true });
+  await saveGaConfig({ quiet: true, accountId });
   if (document.querySelector("[data-filter-key]")) {
-    await saveGaFilters({ quiet: true });
+    await saveGaFilters({ quiet: true, accountId });
   }
   if (document.querySelector("[data-tg-key]") || document.querySelector('[data-ga-key="telegram-reports"]')) {
-    await saveGaReports({ quiet: true });
+    await saveGaReports({ quiet: true, accountId });
   }
   if (document.querySelector("[data-pr-key]") || document.querySelector("[data-fv-key]")) {
-    await saveGaPosting({ quiet: true });
+    await saveGaPosting({ quiet: true, accountId });
   }
-  await saveGaLists({ quiet: true });
-  await saveGaComments({ quiet: true });
+  await saveGaLists({ quiet: true, accountId });
+  await saveGaComments({ quiet: true, accountId });
 }
 const ACCOUNT_TAB_LABELS = {
   basics: "Basics",
@@ -217,6 +225,66 @@ function clearStoryLikesLog() {
   if (el) el.innerHTML = "";
 }
 
+async function showSuccessfulStoryLikes() {
+  const modal = $("story-likes-success-modal");
+  const content = $("story-likes-success-content");
+  if (!modal || !content) return;
+  
+  const accountId = activeAccountId();
+  if (!accountId) {
+    content.innerHTML = '<div class="text-center text-muted-foreground py-4">No account selected</div>';
+    modal.classList.remove("hidden");
+    return;
+  }
+  
+  modal.classList.remove("hidden");
+  content.innerHTML = '<div class="text-center text-muted-foreground py-4">Loading...</div>';
+  
+  try {
+    const response = await fetch(`/api/gramaddict/accounts/${encodeURIComponent(accountId)}/story-likes-success`);
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const data = await response.json();
+    
+    if (!data.liked_accounts || data.liked_accounts.length === 0) {
+      content.innerHTML = '<div class="text-center text-muted-foreground py-4">No successfully liked stories yet</div>';
+      return;
+    }
+    
+    let html = `<div style="margin-bottom: 0.75rem; padding: 0.5rem; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 0.5rem;">
+      <strong>Total accounts with liked stories:</strong> ${data.total_count}
+    </div>`;
+    
+    html += '<div style="display: grid; gap: 0.5rem;">';
+    for (const account of data.liked_accounts) {
+      html += `
+        <div style="padding: 0.75rem; border: 1px solid #e5e7eb; border-radius: 0.5rem; background: #fafafa;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.25rem;">
+            <a href="https://instagram.com/${account.username}" target="_blank" style="font-weight: 600; color: #6366f1; text-decoration: none;">
+              @${account.username}
+            </a>
+            <span style="font-size: 0.75rem; color: #6b7280;">${account.timestamp}</span>
+          </div>
+          <div style="font-size: 0.875rem; color: #6b7280;">
+            Last liked: ${account.segments_liked} segment(s) | Total: ${account.total_likes} segment(s)
+          </div>
+        </div>
+      `;
+    }
+    html += '</div>';
+    
+    content.innerHTML = html;
+  } catch (err) {
+    content.innerHTML = `<div class="text-center text-muted-foreground py-4">Error loading data: ${err.message}</div>`;
+  }
+}
+
+function hideSuccessfulStoryLikes() {
+  const modal = $("story-likes-success-modal");
+  if (modal) modal.classList.add("hidden");
+}
+
 function accountHasStoryLikesEnabled(acct) {
   return Boolean(acct?.story_likes_enabled);
 }
@@ -322,6 +390,8 @@ function loadStoredSelectedSerials() {
   }
 }
 
+let farmSelectionSyncTimer = null;
+
 function persistDeviceSelection() {
   if (activeSerial) {
     localStorage.setItem("activeSerial", activeSerial);
@@ -330,7 +400,19 @@ function persistDeviceSelection() {
     localStorage.removeItem("activeSerial");
     sessionStorage.removeItem("activeSerial");
   }
-  localStorage.setItem("selectedSerials", JSON.stringify([...selectedSerials]));
+  const serials = [...selectedSerials];
+  localStorage.setItem("selectedSerials", JSON.stringify(serials));
+  // Persist Farm checkboxes server-side so the 5 AM starter uses the same set.
+  clearTimeout(farmSelectionSyncTimer);
+  farmSelectionSyncTimer = setTimeout(() => {
+    fetch("/api/gramaddict/farm-selection", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ serials }),
+    }).catch(() => {
+      /* ignore transient sync errors */
+    });
+  }, 250);
 }
 
 loadStoredSelectedSerials();
@@ -503,9 +585,50 @@ function sleepingTagHtml(nextAt) {
   return ` <span class="phones-account-sleeping" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">💤</span>`;
 }
 
+function formatBackOnline(nextAt) {
+  if (!nextAt) return "";
+  const d = new Date(nextAt);
+  if (isNaN(d.getTime())) return "";
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  const time = d.toLocaleTimeString(undefined, {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  if (sameDay) return time;
+  const day = d.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+  });
+  return `${day}, ${time}`;
+}
+
+function actionLimitHtml(acct) {
+  const p = acct?.progress;
+  if (!p?.rate_limited) return "";
+  const when = formatBackOnline(p.next_session_at);
+  const title = when
+    ? `Instagram action limit — back online ${when}`
+    : "Instagram action limit";
+  return `<div class="phones-account-action-limit" title="${escapeHtml(title)}">
+    <span class="phones-account-action-limit-tag">Action limit</span>
+    ${
+      when
+        ? `<span class="phones-account-action-limit-when">Back ${escapeHtml(when)}</span>`
+        : ""
+    }
+  </div>`;
+}
+
 function progressLimitsHtml(acct, acctRunning) {
-  if (!acctRunning || !acct?.progress) return "";
-  const p = acct.progress;
+  // Show counters while running, or while paused on an action limit (even if
+  // the process died mid-sleep — resume time still comes from live_progress).
+  const p = acct?.progress;
+  if (!p) return "";
+  if (!acctRunning && !p.rate_limited) return "";
   const part = (label, val, lim) => {
     if (val == null && !lim) return null;
     return `${label} ${val ?? 0}${lim ? `/${lim}` : ""}`;
@@ -529,8 +652,9 @@ function progressLimitsHtml(acct, acctRunning) {
     );
   }
   const text = parts.filter(Boolean).join(" · ");
-  // 💤 goes at the end of the line (after Stories) when between sessions.
-  const sleeping = p.sleeping ? sleepingTagHtml(p.next_session_at) : "";
+  // Between-session sleep only (action-limit has its own tag under the @).
+  const sleeping =
+    p.sleeping && !p.rate_limited ? sleepingTagHtml(p.next_session_at) : "";
   if (!text && !sleeping) return "";
   return `<div class="phones-account-progress" title="Live session progress">${escapeHtml(text)}${sleeping}</div>`;
 }
@@ -547,6 +671,7 @@ function deviceAccountCellHtml(serial, acct, acctRunning) {
       )}">Disabled</span>`
     : "";
   const marks = `${runningMark}${errorMark}${disabledMark}`;
+  const actionLimit = actionLimitHtml(acct);
   const progress = progressLimitsHtml(acct, acctRunning);
   if (deviceAccountEditingSerial === serial) {
     const handleValue = escapeHtml(deviceAccountInputValue(serial, acct));
@@ -573,6 +698,7 @@ function deviceAccountCellHtml(serial, acct, acctRunning) {
         <button type="button" class="phones-account-display" title="Click to edit · double-click to open @${escapeHtml(handle)} on Instagram">@${escapeHtml(handle)}</button>
         ${marks}
       </div>
+      ${actionLimit}
       ${progress}
       ${deviceAccountNoteHtml(acct)}
     </div>`;
@@ -661,6 +787,9 @@ function bindDeviceAccountCell(row, serial) {
 function syncAccountSelectionFromPhone(serial) {
   const acct = accountForDevice(serial);
   if (!acct || gaCurrentAccountId === acct.id) return;
+  // Update selection for Farm/context only. Do NOT touch the Account form or
+  // flush form fields into this account — that was overwriting vision settings
+  // across accounts when switching phones after an edit.
   gaCurrentAccountId = acct.id;
   localStorage.setItem("gaAccountId", acct.id);
   const select = $("ga-account-select");
@@ -723,7 +852,18 @@ function setMainTab(tab, opts = {}) {
   if (prev !== tab && (prev === "account" || prev === "tools")) flushAutosave();
   updateContextStrip();
   renderSessionEstimate(null);
-  if (tab === "account" && gaCurrentAccountId) scheduleSessionEstimateRefresh();
+  if (tab === "account") {
+    const select = $("ga-account-select");
+    const wanted = select?.value || gaCurrentAccountId;
+    // Farm phone clicks can change the selected account without reloading the
+    // form — reload here so we never edit/save the wrong account's settings.
+    if (wanted && wanted !== gaFormAccountId) {
+      if (select && select.value !== wanted) select.value = wanted;
+      onGaAccountChange();
+    } else if (gaCurrentAccountId) {
+      scheduleSessionEstimateRefresh();
+    }
+  }
   if (tab === "tools") {
     updateToolsView();
     loadAdvFiles();
@@ -1113,8 +1253,6 @@ function onCtxAccountChange() {
 function selectActiveAccount(accountId) {
   const acct = gaAccounts.find((a) => a.id === accountId);
   if (!acct) return;
-  gaCurrentAccountId = accountId;
-  localStorage.setItem("gaAccountId", accountId);
   // Keep the active phone in sync with this account's linked device when it's
   // connected, so the context strip and currentAccount() agree.
   const dev = devices.find(
@@ -1131,8 +1269,13 @@ function selectActiveAccount(accountId) {
   persistDeviceSelection();
   const pageSelect = $("ga-account-select");
   if (pageSelect) pageSelect.value = accountId;
-  setMainTab("account");
-  onGaAccountChange();
+  // Do not change gaCurrentAccountId here — setMainTab("account") / onGaAccountChange
+  // flush the form to the previous account first, then load this one.
+  if (currentMainTab === "account") {
+    onGaAccountChange();
+  } else {
+    setMainTab("account");
+  }
   renderDevices();
 }
 
@@ -1474,13 +1617,8 @@ function selectActiveDevice(serial, opts = {}) {
   updateToolsView();
   populateCtxPhoneSelect();
   if (!quiet) {
-    // Clicking a phone shows only that device's account bot log.
-    if (changed) {
-      renderActiveBotLog();
-    } else {
-      log(`Selected ${shortSerial(serial)}`);
-      renderActiveStoryLikesLog();
-    }
+    // Clicking a phone shows/refreshes that device's account bot log.
+    renderActiveBotLog();
   }
   if (changed && currentMainTab === "tools" && !opts.skipWeditor) {
     connectWeditor(serial);
@@ -1815,10 +1953,10 @@ async function renderActiveBotLog() {
     return;
   }
   const token = ++botLogRenderToken;
-  log(`— ${label} log — loading history…`, "info");
+  log(`— ${label} log — loading most recent activity…`, "info");
   try {
     const res = await fetch(
-      `/api/gramaddict/accounts/${encodeURIComponent(id)}/log?lines=800`
+      `/api/gramaddict/accounts/${encodeURIComponent(id)}/log?lines=1000`
     );
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
@@ -1827,13 +1965,15 @@ async function renderActiveBotLog() {
     el.innerHTML = "";
     const lines = data.lines || [];
     if (!lines.length) {
-      logRaw("(no log history on disk yet)", "info");
+      logRaw("(no log history found - bot has not run yet or logs were cleared)", "info");
     } else {
+      // Show the most recent logs (from today or previous days)
       for (const line of lines.slice().reverse()) {
         logRaw(line, logLevelForLine(line));
       }
     }
-    logRaw(`— ${label} log ${data.running ? "(running)" : "(stopped)"} —`, "info");
+    const statusMsg = data.running ? "(running)" : data.exists && lines.length ? "(stopped - showing history)" : "(stopped)";
+    logRaw(`— ${label} log ${statusMsg} —`, "info");
     logRaw("— live updates above —", "info");
     for (const line of botLogsByAccount[id] || []) {
       log(`[bot] ${line}`, "info");
@@ -4985,6 +5125,7 @@ async function loadGaAccounts() {
 async function onGaAccountChange() {
   const select = $("ga-account-select");
   if (!select?.value) return;
+  // Flush pending edits to the account currently in the form BEFORE switching.
   await flushAutosave();
   setActiveSaveField(null);
   gaCurrentAccountId = select.value;
@@ -5039,6 +5180,8 @@ async function onGaAccountChange() {
     updateContextStrip();
     await loadSettingsTemplateSources();
     if (currentMainTab === "tools") await loadAdvFiles();
+    // Form now represents this account — all autosaves must target it.
+    gaFormAccountId = gaCurrentAccountId;
   } catch (err) {
     setGaStatus(err.message, "error");
   } finally {
@@ -5098,13 +5241,14 @@ async function deleteGaAccount() {
 
 async function saveGaConfig(opts = {}) {
   const quiet = opts.quiet === true;
-  if (!gaCurrentAccountId) {
+  const accountId = opts.accountId || formAccountId();
+  if (!accountId) {
     if (!quiet) setGaStatus("Create or select an account first", "error");
     return;
   }
   setGaStatus("Saving…", "");
   try {
-    const res = await fetch(`/api/gramaddict/accounts/${encodeURIComponent(gaCurrentAccountId)}`, {
+    const res = await fetch(`/api/gramaddict/accounts/${encodeURIComponent(accountId)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ config: collectGaForm() }),
@@ -5115,7 +5259,7 @@ async function saveGaConfig(opts = {}) {
       fillGaForm(data.form || {});
       const rawEl = $("ga-raw-yaml");
       if (rawEl) rawEl.value = data.raw_yaml || "";
-      log(`Saved config for ${gaCurrentAccountId}`);
+      log(`Saved config for ${accountId}`);
       await loadGaAccounts();
     }
     setGaStatus("Saved", "success");
@@ -5126,12 +5270,13 @@ async function saveGaConfig(opts = {}) {
 
 async function saveGaRawYaml(opts = {}) {
   const quiet = opts.quiet === true;
-  if (!gaCurrentAccountId) return;
+  const accountId = opts.accountId || formAccountId();
+  if (!accountId) return;
   const raw = $("ga-raw-yaml")?.value;
   if (raw === undefined) return;
   setGaStatus("Saving…", "");
   try {
-    const res = await fetch(`/api/gramaddict/accounts/${encodeURIComponent(gaCurrentAccountId)}`, {
+    const res = await fetch(`/api/gramaddict/accounts/${encodeURIComponent(accountId)}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ config: {}, raw_yaml: raw }),
@@ -5142,7 +5287,7 @@ async function saveGaRawYaml(opts = {}) {
     if (rawEl) rawEl.value = data.raw_yaml || "";
     if (!quiet) {
       fillGaForm(data.form || {});
-      log(`Saved raw YAML for ${gaCurrentAccountId}`);
+      log(`Saved raw YAML for ${accountId}`);
     }
     setGaStatus("Saved", "success");
   } catch (err) {
@@ -5152,10 +5297,11 @@ async function saveGaRawYaml(opts = {}) {
 
 async function saveGaFilters(opts = {}) {
   const quiet = opts.quiet === true;
-  if (!gaCurrentAccountId) return;
+  const accountId = opts.accountId || formAccountId();
+  if (!accountId) return;
   setGaStatus("Saving…", "");
   try {
-    const res = await fetch(`/api/gramaddict/accounts/${encodeURIComponent(gaCurrentAccountId)}/filters`, {
+    const res = await fetch(`/api/gramaddict/accounts/${encodeURIComponent(accountId)}/filters`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ filters: collectFields("data-filter-key") }),
@@ -5164,7 +5310,7 @@ async function saveGaFilters(opts = {}) {
     if (!res.ok) throw new Error(data.detail || "Save failed");
     if (!quiet) {
       fillFields("data-filter-key", data.form || {});
-      log(`Saved filters for ${gaCurrentAccountId}`);
+      log(`Saved filters for ${accountId}`);
     }
     setGaStatus("Saved", "success");
   } catch (err) {
@@ -5174,26 +5320,27 @@ async function saveGaFilters(opts = {}) {
 
 async function saveGaPosting(opts = {}) {
   const quiet = opts.quiet === true;
-  if (!gaCurrentAccountId) return;
+  const accountId = opts.accountId || formAccountId();
+  if (!accountId) return;
   setGaStatus("Saving…", "");
   try {
     const [settingsRes, promptsRes, fvSettingsRes, fvPromptsRes] = await Promise.all([
-      fetch(`/api/gramaddict/accounts/${encodeURIComponent(gaCurrentAccountId)}/post-reel`, {
+      fetch(`/api/gramaddict/accounts/${encodeURIComponent(accountId)}/post-reel`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ post_reel: collectFields("data-pr-key") }),
       }),
-      fetch(`/api/gramaddict/accounts/${encodeURIComponent(gaCurrentAccountId)}/post-reel/prompts`, {
+      fetch(`/api/gramaddict/accounts/${encodeURIComponent(accountId)}/post-reel/prompts`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompts: collectPostReelPrompts() }),
       }),
-      fetch(`/api/gramaddict/accounts/${encodeURIComponent(gaCurrentAccountId)}/follow-vision`, {
+      fetch(`/api/gramaddict/accounts/${encodeURIComponent(accountId)}/follow-vision`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ follow_vision: collectFields("data-fv-key") }),
       }),
-      fetch(`/api/gramaddict/accounts/${encodeURIComponent(gaCurrentAccountId)}/follow-vision/prompts`, {
+      fetch(`/api/gramaddict/accounts/${encodeURIComponent(accountId)}/follow-vision/prompts`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ prompts: collectFollowVisionPrompts() }),
@@ -5207,7 +5354,7 @@ async function saveGaPosting(opts = {}) {
     if (!promptsRes.ok) throw new Error(promptsData.detail || "Prompts save failed");
     if (!fvSettingsRes.ok) throw new Error(fvSettingsData.detail || "Follow vision save failed");
     if (!fvPromptsRes.ok) throw new Error(fvPromptsData.detail || "Follow vision prompts save failed");
-    if (!quiet) log(`Saved posting settings for ${gaCurrentAccountId}`);
+    if (!quiet) log(`Saved posting settings for ${accountId}`);
     setGaStatus("Saved", "success");
   } catch (err) {
     setGaStatus(err.message, "error");
@@ -5216,16 +5363,17 @@ async function saveGaPosting(opts = {}) {
 
 async function saveGaReports(opts = {}) {
   const quiet = opts.quiet === true;
-  if (!gaCurrentAccountId) return;
+  const accountId = opts.accountId || formAccountId();
+  if (!accountId) return;
   setGaStatus("Saving…", "");
   try {
     const [cfgRes, tgRes] = await Promise.all([
-      fetch(`/api/gramaddict/accounts/${encodeURIComponent(gaCurrentAccountId)}`, {
+      fetch(`/api/gramaddict/accounts/${encodeURIComponent(accountId)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ config: collectGaForm() }),
       }),
-      fetch(`/api/gramaddict/accounts/${encodeURIComponent(gaCurrentAccountId)}/telegram`, {
+      fetch(`/api/gramaddict/accounts/${encodeURIComponent(accountId)}/telegram`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ telegram: collectFields("data-tg-key") }),
@@ -5238,7 +5386,7 @@ async function saveGaReports(opts = {}) {
     if (!quiet) {
       fillGaForm(cfgData.form || {});
       fillFields("data-tg-key", tgData.form || {});
-      log(`Saved reports for ${gaCurrentAccountId}`);
+      log(`Saved reports for ${accountId}`);
     }
     setGaStatus("Saved", "success");
   } catch (err) {
@@ -5246,13 +5394,13 @@ async function saveGaReports(opts = {}) {
   }
 }
 
-async function saveAccountTextFiles(fileKeys) {
-  if (!gaCurrentAccountId) return;
+async function saveAccountTextFiles(fileKeys, accountId = formAccountId()) {
+  if (!accountId) return;
   for (const name of fileKeys) {
     const el = document.querySelector(`[data-file-key="${name}"]`);
     if (!el) continue;
     const res = await fetch(
-      `/api/gramaddict/accounts/${encodeURIComponent(gaCurrentAccountId)}/files/${encodeURIComponent(name)}`,
+      `/api/gramaddict/accounts/${encodeURIComponent(accountId)}/files/${encodeURIComponent(name)}`,
       {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
@@ -5268,11 +5416,12 @@ async function saveAccountTextFiles(fileKeys) {
 
 async function saveGaLists(opts = {}) {
   const quiet = opts.quiet === true;
-  if (!gaFilesMeta?.lists) return;
+  const accountId = opts.accountId || formAccountId();
+  if (!gaFilesMeta?.lists || !accountId) return;
   setGaStatus("Saving…", "");
   try {
-    await saveAccountTextFiles(Object.keys(gaFilesMeta.lists));
-    if (!quiet) log(`Saved lists for ${gaCurrentAccountId}`);
+    await saveAccountTextFiles(Object.keys(gaFilesMeta.lists), accountId);
+    if (!quiet) log(`Saved lists for ${accountId}`);
     setGaStatus("Saved", "success");
   } catch (err) {
     setGaStatus(err.message, "error");
@@ -5281,12 +5430,13 @@ async function saveGaLists(opts = {}) {
 
 async function saveGaComments(opts = {}) {
   const quiet = opts.quiet === true;
-  if (!gaFilesMeta?.text) return;
+  const accountId = opts.accountId || formAccountId();
+  if (!gaFilesMeta?.text || !accountId) return;
   syncAllCommentsListWidgets();
   setGaStatus("Saving…", "");
   try {
-    await saveAccountTextFiles(Object.keys(gaFilesMeta.text));
-    if (!quiet) log(`Saved comments/PM for ${gaCurrentAccountId}`);
+    await saveAccountTextFiles(Object.keys(gaFilesMeta.text), accountId);
+    if (!quiet) log(`Saved comments/PM for ${accountId}`);
     setGaStatus("Saved", "success");
   } catch (err) {
     setGaStatus(err.message, "error");
@@ -5294,7 +5444,7 @@ async function saveGaComments(opts = {}) {
 }
 
 function onAccountFieldInput(event) {
-  if (gaFormLoading || !gaCurrentAccountId) return;
+  if (gaFormLoading || !formAccountId()) return;
   const target = event.target;
   if (!target) return;
 
@@ -5303,9 +5453,10 @@ function onAccountFieldInput(event) {
     target.closest(".ga-check") ||
     target.closest(".ga-form-section");
   setActiveSaveField(fieldContainer);
+  const accountId = formAccountId();
 
   if (target.id === "ga-raw-yaml") {
-    scheduleAutosave("raw-yaml", () => saveGaRawYaml({ quiet: true }), 1500);
+    scheduleAutosave("raw-yaml", () => saveGaRawYaml({ quiet: true, accountId }), 1500);
     return;
   }
   if (target.matches("[data-ga-key]")) {
@@ -5323,35 +5474,35 @@ function onAccountFieldInput(event) {
     }
     scheduleSessionEstimateRefresh();
     if (currentAccountTab === "reports") {
-      scheduleAutosave("reports", () => saveGaReports({ quiet: true }));
+      scheduleAutosave("reports", () => saveGaReports({ quiet: true, accountId }));
     } else {
-      scheduleAutosave("config", () => saveGaConfig({ quiet: true }));
+      scheduleAutosave("config", () => saveGaConfig({ quiet: true, accountId }));
     }
     return;
   }
   if (target.matches("[data-filter-key]")) {
-    scheduleAutosave("filters", () => saveGaFilters({ quiet: true }));
+    scheduleAutosave("filters", () => saveGaFilters({ quiet: true, accountId }));
     return;
   }
   if (target.matches("[data-tg-key]")) {
-    scheduleAutosave("reports", () => saveGaReports({ quiet: true }));
+    scheduleAutosave("reports", () => saveGaReports({ quiet: true, accountId }));
     return;
   }
   if (target.matches("[data-pr-key]") || target.matches("[data-pr-prompt]")) {
     scheduleSessionEstimateRefresh();
-    scheduleAutosave("posting", () => saveGaPosting({ quiet: true }));
+    scheduleAutosave("posting", () => saveGaPosting({ quiet: true, accountId }));
     return;
   }
   if (target.matches("[data-fv-key]") || target.matches("[data-fv-prompt]")) {
-    scheduleAutosave("posting", () => saveGaPosting({ quiet: true }));
+    scheduleAutosave("posting", () => saveGaPosting({ quiet: true, accountId }));
     return;
   }
   if (target.matches("[data-file-key]")) {
     const name = target.dataset.fileKey;
     if (gaFilesMeta?.lists?.[name]) {
-      scheduleAutosave("lists", () => saveGaLists({ quiet: true }));
+      scheduleAutosave("lists", () => saveGaLists({ quiet: true, accountId }));
     } else if (gaFilesMeta?.text?.[name]) {
-      scheduleAutosave("comments", () => saveGaComments({ quiet: true }));
+      scheduleAutosave("comments", () => saveGaComments({ quiet: true, accountId }));
     }
   }
 }
@@ -5518,7 +5669,8 @@ function onFarmRunModeChange() {
 function initFarmRunMode() {
   const select = $("farm-run-mode");
   if (!select) return;
-  const saved = localStorage.getItem("farmRunMode") || "consecutive";
+  // Default parallel — morning start always runs parallel anyway.
+  const saved = localStorage.getItem("farmRunMode") || "parallel";
   if ([...select.options].some((o) => o.value === saved)) select.value = saved;
 }
 
@@ -6200,6 +6352,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   await refreshDevices();
   restoreActiveSelection();
   renderDevices();
+  // Sync current Farm checkboxes to the server for the 5 AM auto-start.
+  persistDeviceSelection();
   loadDebugTests();
   try {
     await loadBrandPools();

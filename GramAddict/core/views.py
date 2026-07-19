@@ -454,7 +454,7 @@ class SearchView:
             return False
         if self._check_current_view(target, job):
             logger.info(f"{target} is in recent history.")
-            return True
+            return self._ensure_account_profile(target, job)
         search_query = self._search_query(target, job)
         if "hashtag" in job:
             logger.info(f"Typing hashtag search query: {search_query!r}")
@@ -466,7 +466,7 @@ class SearchView:
             )
         if self._check_current_view(target, job):
             logger.info(f"{target} is in top view.")
-            return True
+            return self._ensure_account_profile(target, job)
         echo_text = self.device.find(resourceId=ResourceID.ECHO_TEXT)
         if echo_text.exists(Timeout.SHORT):
             logger.debug("Pressing on see all results.")
@@ -474,8 +474,61 @@ class SearchView:
         # at this point we have the tabs available
         self._switch_to_target_tag(job)
         if self._check_current_view(target, job, in_place_tab=True):
-            return True
+            return self._ensure_account_profile(target, job)
         return False
+
+    def _ensure_account_profile(self, target: str, job: str) -> bool:
+        """After a search tap, leave Instagram's SERP account preview if needed."""
+        if "place" in job or "hashtag" in job:
+            return True
+        self._open_account_from_serp_preview(target)
+        return True
+
+    def _open_account_from_serp_preview(self, target: str) -> bool:
+        """Open the real profile when Search lands on a 'For you' account card.
+
+        Newer Instagram builds sometimes open a SERP journey page
+        (``serp_journey_header_container``) with a top account row instead of
+        the profile. The username TextView is not clickable; tap the left side
+        of ``row_search_user_container`` (name/avatar) so we don't hit Follow.
+        """
+        serp = self.device.find(
+            resourceIdMatches=case_insensitive_re(
+                ResourceID.SERP_JOURNEY_HEADER_CONTAINER
+            ),
+        )
+        if not serp.exists(Timeout.SHORT):
+            return False
+
+        want = target.strip().lstrip("@")
+        username = self.device.find(
+            resourceIdMatches=case_insensitive_re(
+                ResourceID.ROW_SEARCH_USER_USERNAME
+            ),
+            textMatches=case_insensitive_re(rf"^{re.escape(want)}$"),
+        )
+        if not username.exists(Timeout.SHORT):
+            logger.debug(
+                f"SERP preview visible but no account row for '{target}'."
+            )
+            return False
+
+        logger.info(
+            f"Search opened a preview for '{want}' instead of the profile; "
+            "tapping the account name/row."
+        )
+        container = self.device.find(
+            resourceIdMatches=case_insensitive_re(
+                ResourceID.ROW_SEARCH_USER_CONTAINER
+            ),
+        )
+        if container.exists(Timeout.SHORT):
+            # LEFT avoids the Follow button on the right of the row.
+            container.click(Location.LEFT, sleep=SleepTime.SHORT)
+        else:
+            # Username itself is often not clickable; coordinate click still works.
+            username.click(sleep=SleepTime.SHORT)
+        return True
 
     def _switch_to_target_tag(self, job: str):
         if "place" in job:

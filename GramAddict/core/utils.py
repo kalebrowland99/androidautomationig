@@ -481,7 +481,9 @@ def is_instagram_try_again_later_visible(device) -> bool:
         obj = device.find(resourceIdMatches=rid)
         if not obj.exists(Timeout.ZERO):
             continue
-        text = (obj.get_text() or "").lower()
+        # Element can vanish between exists() and get_text() during fast
+        # navigations (story likes). Never let that kill the bot.
+        text = (obj.get_text(error=False) or "").lower()
         if "try again later" in text or "limit how often" in text:
             return True
     return False
@@ -521,34 +523,39 @@ def check_instagram_rate_limit(device, *, raise_on_limit: bool = True) -> bool:
 
 
 def take_rate_limit_break(device, session_state, sessions, configs) -> None:
-    """Close Instagram and sleep until it is safe to resume automation."""
+    """Close Instagram and sleep until it is safe to resume automation.
+
+    Pause length escalates for consecutive action limits:
+    1–1.5h → 3h → 8h → 12h → 24h.
+    """
     from GramAddict.core.live_progress import write_live_progress
-    from GramAddict.core.rate_limit_history import record_rate_limit_event
+    from GramAddict.core.rate_limit_history import (
+        next_rate_limit_break_minutes,
+        record_rate_limit_event,
+    )
     from GramAddict.plugins.telegram import send_telegram_alert
 
-    minutes = int(get_value(getattr(configs.args, "rate_limit_break", None), None, 720))
     username = session_state.my_username or getattr(configs.args, "username", None)
+    minutes, streak = next_rate_limit_break_minutes(username)
     record_rate_limit_event(
         username,
         session_state,
         break_minutes=minutes,
+        streak=streak,
     )
-    counts = session_state.totalDailyStoryAccounts
+    hours = minutes / 60.0
+    hours_label = f"{hours:.1f}h" if minutes % 60 else f"{int(hours)}h"
+    next_session_at = datetime.now() + timedelta(minutes=minutes)
     send_telegram_alert(
         username,
-        "Instagram rate limit",
-        (
-            f"'Try Again Later' detected. Pausing automation for {minutes} minutes. "
-            f"Session counts — daily story accounts: {counts}, "
-            f"story likes: {session_state.totalStoryLikes}, "
-            f"follows: {sum(session_state.totalFollowed.values())}, "
-            f"likes: {session_state.totalLikes}."
-        ),
+        "Action limit",
+        f"Back {next_session_at.strftime('%I:%M %p')} ({hours_label})",
+        stopped=False,
     )
     close_instagram(device)
-    next_session_at = datetime.now() + timedelta(minutes=minutes)
     logger.info(
-        f"Rate-limit break: sleeping {minutes} minutes — next attempt at "
+        f"Rate-limit break (streak {streak}): sleeping {minutes} minutes "
+        f"({hours_label}) — next attempt at "
         f"{next_session_at.strftime('%I:%M:%S %p (%Y/%m/%d)')}.",
         extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
     )
@@ -558,6 +565,7 @@ def take_rate_limit_break(device, session_state, sessions, configs) -> None:
         running=True,
         sleeping=True,
         next_session_at=next_session_at.isoformat(timespec="seconds"),
+        rate_limited=True,
         current_job=None,
     )
     try:
@@ -570,6 +578,7 @@ def take_rate_limit_break(device, session_state, sessions, configs) -> None:
         running=True,
         sleeping=False,
         next_session_at=None,
+        rate_limited=False,
         current_job=None,
     )
 

@@ -56,6 +56,12 @@ class ResourceID:
             f"{APP_ID}:id/follow_list_sorting_options_recycler_view"
         )
         self.FOLLOW_LIST_USERNAME = f"{APP_ID}:id/follow_list_username"
+        self.FOLLOW_LIST_USER_IMAGEVIEW = f"{APP_ID}:id/follow_list_user_imageview"
+        self.ROW_USER_IMAGEVIEW = f"{APP_ID}:id/row_user_imageview"
+        # Avatar in followers list or likers sheet (story ring lives here).
+        self.LIST_ROW_USER_AVATAR = (
+            f"{self.FOLLOW_LIST_USER_IMAGEVIEW}|{self.ROW_USER_IMAGEVIEW}"
+        )
         self.FOLLOW_SHEET_UNFOLLOW_ROW = f"{APP_ID}:id/follow_sheet_unfollow_row"
         self.FOOTER_SPACE = f"{APP_ID}:id/footer_space"
         self.GAP_VIEW = f"{APP_ID}:id/gap_view"
@@ -215,10 +221,15 @@ class ResourceID:
             f"{APP_ID}:id/row_profile_header_textview_post_count|{APP_ID}:id/profile_header_familiar_post_count_value"
         )
         self.ROW_SEARCH_EDIT_TEXT = f"{APP_ID}:id/row_search_edit_text"
+        self.ROW_SEARCH_USER_CONTAINER = f"{APP_ID}:id/row_search_user_container"
         self.ROW_SEARCH_USER_USERNAME = f"{APP_ID}:id/row_search_user_username"
         self.ROW_SEARCH_KEYWORD_TITLE = f"{APP_ID}:id/row_search_keyword_title"
         self.ROW_SEARCH_KEYWORD_SUBTITLE = f"{APP_ID}:id/row_search_keyword_subtitle"
         self.ROW_SEARCH_AVATAR_WITH_RING = f"{APP_ID}:id/row_search_avatar_with_ring"
+        # Instagram "For you" search journey (account card preview, not a profile).
+        self.SERP_JOURNEY_HEADER_CONTAINER = (
+            f"{APP_ID}:id/serp_journey_header_container"
+        )
         self.ROW_SIMPLE_TEXT_TEXTVIEW = f"{APP_ID}:id/row_simple_text_textview"
         self.ROW_THREAD_COMPOSER_BUTTON_SEND = (
             f"{APP_ID}:id/row_thread_composer_button_send|{APP_ID}:id/row_thread_composer_send_button_icon"

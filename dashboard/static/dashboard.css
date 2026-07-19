@@ -1945,6 +1945,32 @@ body.brand-labely .phones-td-warmup {
   50% { opacity: 1; }
 }
 
+.phones-account-action-limit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.35rem;
+  line-height: 1.25;
+}
+
+.phones-account-action-limit-tag {
+  display: inline-block;
+  font-size: 0.625rem;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #9a3412;
+  background: #ffedd5;
+  border: 1px solid #fdba74;
+  border-radius: 0.25rem;
+  padding: 0.05rem 0.35rem;
+}
+
+.phones-account-action-limit-when {
+  font-size: 0.6875rem;
+  color: hsl(var(--muted-foreground));
+}
+
 .phones-account-note {
   margin-top: 0.1rem;
   width: 100%;
@@ -3204,6 +3230,13 @@ body.brand-labely .phones-td-warmup {
   font-size: 0.75rem;
 }
 
+.account-posting-note-emphasize {
+  padding: 0.65rem 0.75rem;
+  border-radius: 0.55rem;
+  border: 1px solid hsl(var(--border));
+  background: hsl(var(--muted) / 0.35);
+}
+
 .account-posting-section-divider {
   margin: 1.5rem 0 1rem;
   border-top: 1px solid hsl(var(--border) / 0.35);
@@ -3214,6 +3247,69 @@ body.brand-labely .phones-td-warmup {
   font-size: 0.8125rem;
   font-weight: 600;
   color: hsl(var(--foreground));
+}
+
+.daily-story-panel {
+  margin: 0 0 0.25rem;
+}
+
+.daily-story-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin-bottom: 0.35rem;
+}
+
+.daily-story-panel-head .account-posting-subhead {
+  margin: 0;
+}
+
+.daily-story-lock-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: hsl(var(--muted-foreground));
+  background: hsl(var(--muted));
+  border: 1px solid hsl(var(--border));
+}
+
+.daily-story-panel.is-locked {
+  opacity: 0.72;
+}
+
+.daily-story-locked-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  margin-top: 0.85rem;
+  pointer-events: none;
+  user-select: none;
+}
+
+.daily-story-dropzone {
+  border: 1px dashed hsl(var(--muted-foreground) / 0.28);
+  background: hsl(var(--muted) / 0.18);
+  border-radius: 0.65rem;
+  padding: 1.1rem 1rem;
+  text-align: center;
+}
+
+.daily-story-dropzone-title {
+  margin: 0;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.daily-story-dropzone-hint {
+  margin: 0.35rem 0 0;
+  font-size: 0.75rem;
+  color: hsl(var(--muted-foreground));
 }
 
 #view-account .ga-check-row {

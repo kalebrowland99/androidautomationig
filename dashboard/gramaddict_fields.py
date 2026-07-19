@@ -148,7 +148,12 @@ EDITABLE_FIELDS: dict[str, list[dict[str, Any]]] = {
         {"key": "working-hours", "label": "Allowed hours each day", "type": "working-hours"},
         {"key": "time-delta", "label": "Random start-time wiggle (minutes)", "type": "text", "default": "10-15"},
         {"key": "repeat", "label": "Break between sessions (minutes)", "type": "text", "default": "280-320"},
-        {"key": "rate-limit-break", "label": "Rate-limit pause (minutes)", "type": "text", "default": "720"},
+        {
+            "key": "rate-limit-break",
+            "label": "Rate-limit pause (legacy, unused)",
+            "type": "text",
+            "default": "720",
+        },
         {"key": "total-sessions", "label": "How many sessions to run", "type": "text", "default": "1", "placeholder": "1"},
     ],
     "scripts": [

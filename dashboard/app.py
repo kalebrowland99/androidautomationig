@@ -238,6 +238,17 @@ class BotRunBody(BaseModel):
     vpn_app_name: Optional[str] = None
 
 
+class FarmSelectionBody(BaseModel):
+    serials: list[str] = Field(default_factory=list)
+
+
+class FarmRunSelectedBody(BaseModel):
+    """Start Farm-checked phones. Morning start always uses parallel=True."""
+    serials: Optional[list[str]] = None
+    vpn_app_name: Optional[str] = None
+    parallel: bool = True
+
+
 class AccountDisableBody(BaseModel):
     disabled: bool = True
     reason: str = ""
@@ -819,6 +830,100 @@ async def api_gramaddict_accounts_status() -> list[dict[str, Any]]:
     return await asyncio.to_thread(gramaddict_config.accounts_status)
 
 
+@app.get("/api/gramaddict/farm-selection")
+async def api_gramaddict_get_farm_selection() -> dict[str, Any]:
+    selection = await asyncio.to_thread(gramaddict_config.get_farm_selection)
+    resolved = await asyncio.to_thread(
+        gramaddict_config.resolve_farm_selection_targets, selection.get("serials") or []
+    )
+    return {**selection, **resolved}
+
+
+@app.put("/api/gramaddict/farm-selection")
+async def api_gramaddict_save_farm_selection(body: FarmSelectionBody) -> dict[str, Any]:
+    selection = await asyncio.to_thread(
+        gramaddict_config.save_farm_selection, body.serials
+    )
+    resolved = await asyncio.to_thread(
+        gramaddict_config.resolve_farm_selection_targets, selection.get("serials") or []
+    )
+    return {**selection, **resolved}
+
+
+@app.post("/api/gramaddict/farm-run-selected")
+async def api_gramaddict_farm_run_selected(
+    body: Optional[FarmRunSelectedBody] = None,
+) -> dict[str, Any]:
+    """Start all Farm-checked (or provided) phones in parallel.
+
+    Used by the daily 5 AM morning starter so whatever is checked on Farm
+    is what runs — selection can change anytime without editing scripts.
+    """
+    serials = body.serials if body and body.serials is not None else None
+    vpn_app_name = body.vpn_app_name if body else None
+    # Morning / API farm start is always parallel.
+    parallel = True if body is None else bool(body.parallel)
+
+    if serials is None:
+        selection = await asyncio.to_thread(gramaddict_config.get_farm_selection)
+        serials = selection.get("serials") or []
+
+    resolved = await asyncio.to_thread(
+        gramaddict_config.resolve_farm_selection_targets, serials
+    )
+    targets = resolved.get("targets") or []
+    skipped = resolved.get("skipped") or []
+
+    async def _on_log(acct: str, line: str) -> None:
+        await _broadcast({"type": "bot_log", "account": acct, "message": line})
+
+    started: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+
+    async def _start_one(target: dict[str, Any]) -> None:
+        account_id = target["account_id"]
+        serial = target["serial"]
+        try:
+            result = await gramaddict_config.start_bot(
+                account_id,
+                device_serial=serial,
+                vpn_app_name=vpn_app_name,
+                log_callback=_on_log,
+            )
+            started.append(
+                {
+                    "account_id": account_id,
+                    "username": target.get("username") or account_id,
+                    "serial": serial,
+                    "result": result,
+                }
+            )
+        except Exception as exc:
+            failed.append(
+                {
+                    "account_id": account_id,
+                    "username": target.get("username") or account_id,
+                    "serial": serial,
+                    "error": str(exc),
+                }
+            )
+
+    if parallel and targets:
+        await asyncio.gather(*[_start_one(t) for t in targets])
+    else:
+        for target in targets:
+            await _start_one(target)
+
+    return {
+        "parallel": parallel,
+        "serials": list(serials),
+        "targets": targets,
+        "skipped": skipped,
+        "started": started,
+        "failed": failed,
+    }
+
+
 @app.get("/api/gramaddict/accounts/{account_id}/status")
 async def api_gramaddict_bot_status(account_id: str) -> dict[str, Any]:
     return gramaddict_config.bot_status(account_id)
@@ -841,6 +946,15 @@ async def api_gramaddict_story_likes_log(
     lines = max(1, min(lines, 2000))
     return await asyncio.to_thread(
         gramaddict_config.read_story_likes_log, account_id, max_lines=lines
+    )
+
+
+@app.get("/api/gramaddict/accounts/{account_id}/story-likes-success")
+async def api_gramaddict_story_likes_success(
+    account_id: str
+) -> dict[str, Any]:
+    return await asyncio.to_thread(
+        gramaddict_config.get_successfully_liked_accounts, account_id
     )
 
 

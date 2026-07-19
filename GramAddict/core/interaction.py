@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from argparse import Namespace
 from datetime import datetime
 from os import path
@@ -1209,6 +1210,231 @@ def _find_story_like_button(device: DeviceFacade, *, fast: bool = False):
     return None
 
 
+def list_story_likes_only(args: Namespace) -> bool:
+    """True when list jobs should only like stories (no follows / post likes).
+
+    Enabled by setting follow-percentage and likes-percentage to 0 while
+    stories-percentage is > 0. Those jobs then tap the story ring in the
+    followers/likers list instead of opening the profile.
+    """
+    follow_pct = get_value(getattr(args, "follow_percentage", None), None, 40)
+    likes_pct = get_value(getattr(args, "likes_percentage", None), None, 100)
+    stories_pct = get_value(getattr(args, "stories_percentage", None), None, 0)
+    return follow_pct == 0 and likes_pct == 0 and stories_pct > 0
+
+
+def _bounds_overlap_y(a: dict, b: dict) -> bool:
+    """True when two UiAutomator bounds dicts overlap vertically."""
+    return not (a["bottom"] <= b["top"] or a["top"] >= b["bottom"])
+
+
+def find_list_row_story_ring(row, username: str):
+    """Return the clickable story-ring control in a followers/likers row, or None.
+
+    Likers sheet: ``row_user_imageview`` Button with desc ``View {user}'s story``.
+    Followers list: ``follow_list_user_imageview`` FrameLayout that contains a
+    ring stub View (content-desc like ``@2131975699``).
+
+    Important: UiAutomator ``.child()`` is *not* reliably scoped to the row —
+    ring stubs from other visible rows can match. Always verify Y-bounds overlap
+    with the row (and prefer device-wide stub scan + bounds match for followers).
+    """
+    want = (username or "").strip().lstrip("@")
+    if not want:
+        return None
+
+    try:
+        row_bounds = row.get_bounds()
+    except DeviceFacade.JsonRpcError:
+        return None
+
+    # Likers / user rows — explicit "View …'s story" a11y label.
+    for desc_re in (
+        rf"View\s+{re.escape(want)}'s\s+story",
+        r"View\s+.+'s\s+story",
+    ):
+        story_btn = row.child(
+            resourceIdMatches=case_insensitive_re(ResourceID.LIST_ROW_USER_AVATAR),
+            descriptionMatches=case_insensitive_re(desc_re),
+        )
+        if not story_btn.exists(Timeout.ZERO):
+            continue
+        try:
+            if _bounds_overlap_y(row_bounds, story_btn.get_bounds()):
+                return story_btn
+        except DeviceFacade.JsonRpcError:
+            continue
+
+    # Followers list — ring is android.view.View with unresolved @digits desc.
+    # Match stubs device-wide, then keep only those that overlap this row.
+    try:
+        stubs = row.deviceV2(
+            className=ClassName.VIEW,
+            resourceId=ResourceID.FOLLOW_LIST_USER_IMAGEVIEW,
+            descriptionMatches=r"@\d+",
+        )
+        stub_count = stubs.count
+    except Exception:
+        stub_count = 0
+        stubs = None
+
+    for i in range(stub_count):
+        stub = stubs[i]
+        try:
+            stub_bounds = stub.info["bounds"]
+        except Exception:
+            continue
+        if not _bounds_overlap_y(row_bounds, stub_bounds):
+            continue
+        # Click the FrameLayout avatar that owns this ring (stub itself is not clickable).
+        try:
+            avatars = row.deviceV2(
+                resourceId=ResourceID.FOLLOW_LIST_USER_IMAGEVIEW,
+                className=ClassName.FRAME_LAYOUT,
+                clickable=True,
+            )
+            for j in range(avatars.count):
+                avatar = avatars[j]
+                try:
+                    avatar_bounds = avatar.info["bounds"]
+                except Exception:
+                    continue
+                if _bounds_overlap_y(stub_bounds, avatar_bounds) and _bounds_overlap_y(
+                    row_bounds, avatar_bounds
+                ):
+                    return DeviceFacade.View(view=avatar, device=row.deviceV2)
+        except Exception:
+            pass
+        return DeviceFacade.View(view=stub, device=row.deviceV2)
+
+    return None
+
+
+def _followers_or_likers_list_visible(device: DeviceFacade) -> bool:
+    """True when a followers list or post-likers sheet is on screen."""
+    rid = _story_like_resource_ids()
+    if device.find(
+        resourceIdMatches=case_insensitive_re(rid.USER_LIST_CONTAINER)
+    ).exists(Timeout.ZERO):
+        return True
+    if device.find(textMatches=case_insensitive_re(r"^Likes$")).exists(Timeout.ZERO):
+        return True
+    return False
+
+
+def _story_viewer_visible(device: DeviceFacade) -> bool:
+    rid = _story_like_resource_ids()
+    return device.find(
+        resourceIdMatches=case_insensitive_re(
+            f"{rid.REEL_VIEWER_MEDIA_CONTAINER}|{rid.REEL_VIEWER_TITLE}"
+        )
+    ).exists(Timeout.ZERO)
+
+
+def close_story_back_to_list(device: DeviceFacade, *, max_backs: int = 6) -> bool:
+    """Leave the story viewer (or a wrongly opened profile) and return to the list."""
+    for _ in range(max_backs):
+        if _followers_or_likers_list_visible(device):
+            return True
+        # modulable=False — default back() sleep is slow and looks like a hang.
+        device.back(modulable=False)
+        random_sleep(0.2, 0.35, modulable=False, log=False, minimum=0.1)
+    return _followers_or_likers_list_visible(device)
+
+
+def like_stories_from_list_row(
+    device: DeviceFacade,
+    row,
+    username: str,
+    args: Namespace,
+    session_state: SessionState,
+) -> int:
+    """Tap the list-row story ring (if present) and like one story segment.
+
+    Always tries to land back on the followers/likers list so the next row
+    iteration is not left on a profile or inside the story viewer.
+    """
+    if not random_choice(
+        get_value(getattr(args, "stories_percentage", None), None, 100)
+    ):
+        return 0
+    if session_state.check_limit(
+        limit_type=session_state.Limit.WATCHES, output=False
+    ):
+        logger.info("Reached total watch limit, not watching stories.")
+        return 0
+
+    ring = find_list_row_story_ring(row, username)
+    if ring is None:
+        logger.info(
+            f"@{username}: no story ring — skip.",
+            extra={"color": f"{Fore.GREEN}"},
+        )
+        return 0
+
+    logger.info(
+        f"@{username}: story ring found — opening.",
+        extra={"color": f"{Fore.YELLOW}"},
+    )
+    try:
+        ring.click(sleep=SleepTime.ZERO)
+    except DeviceFacade.JsonRpcError:
+        logger.info(f"@{username}: story ring vanished before tap.")
+        return 0
+
+    random_sleep(0.45, 0.8, modulable=False, log=False, minimum=0.2)
+    story_view = CurrentStoryView(device)
+    story_frame = story_view.getStoryFrame()
+    if not story_frame.exists(Timeout.MEDIUM):
+        logger.info(
+            f"@{username}: story viewer didn't open — back to list.",
+            extra={"color": f"{Fore.GREEN}"},
+        )
+        close_story_back_to_list(device)
+        return 0
+
+    likes_counter = 0
+    try:
+        session_state.totalWatched += 1
+        logger.info(
+            f"@{username}: story open — liking (session watches "
+            f"{session_state.totalWatched}).",
+            extra={"color": f"{Fore.GREEN}"},
+        )
+        for _ in range(4):
+            random_sleep(0.15, 0.3, modulable=False, log=False, minimum=0.05)
+            obj = _find_story_like_button(device, fast=True)
+            if obj is None:
+                continue
+            try:
+                if not obj.get_selected():
+                    obj.click()
+                    random_sleep(0.1, 0.2, modulable=False, log=False, minimum=0.05)
+                    logger.info(
+                        f"@{username}: story liked.",
+                        extra={"color": f"{Fore.GREEN}"},
+                    )
+                else:
+                    logger.info(f"@{username}: story already liked.")
+                likes_counter += 1
+                register_story_like(session_state)
+                break
+            except Exception as exc:
+                logger.warning("@%s: story like tap failed: %s", username, exc)
+        if likes_counter == 0:
+            logger.warning(f"@{username}: opened story but could not like it.")
+    finally:
+        logger.info(f"@{username}: closing story → back to list.")
+        if not close_story_back_to_list(device):
+            logger.warning(
+                f"@{username}: could not confirm followers/likers list after story."
+            )
+        else:
+            logger.info(f"@{username}: back on followers/likers list.")
+    # Return >0 whenever the viewer opened so the list loop can scroll onward.
+    return likes_counter if likes_counter > 0 else 1
+
+
 def like_all_profile_stories(
     device: DeviceFacade,
     profile_view: ProfileView,
@@ -1219,6 +1445,7 @@ def like_all_profile_stories(
     require_unviewed: bool = False,
     always_like_stories: bool = False,
     daily_story_likes: bool = False,
+    already_open: bool = False,
 ) -> int:
     """Open profile stories, watch each segment, and like it. Returns segments liked."""
     check_instagram_rate_limit(device)
@@ -1228,25 +1455,26 @@ def like_all_profile_stories(
         logger.info("Reached total watch limit, not watching stories.")
         return 0
 
-    if always_like_stories:
-        story_ui_timeout = Timeout.TINY
-        if not profile_view.has_story_to_like(ui_timeout=story_ui_timeout):
-            if profile_view.live_marker().exists(Timeout.ZERO):
+    if not already_open:
+        if always_like_stories:
+            story_ui_timeout = Timeout.TINY
+            if not profile_view.has_story_to_like(ui_timeout=story_ui_timeout):
+                if profile_view.live_marker().exists(Timeout.ZERO):
+                    logger.info(f"@{username} is making a live.")
+                else:
+                    logger.info(f"@{username} has no story — skip.")
+                return 0
+        elif require_unviewed:
+            if not profile_view.has_unviewed_story():
+                logger.info(f"@{username} has no new story — skip.")
+                return 0
+        elif not profile_view.has_story_to_like():
+            if profile_view.live_marker().exists(Timeout.SHORT):
                 logger.info(f"@{username} is making a live.")
-            else:
-                logger.info(f"@{username} has no story — skip.")
             return 0
-    elif require_unviewed:
-        if not profile_view.has_unviewed_story():
-            logger.info(f"@{username} has no new story — skip.")
-            return 0
-    elif not profile_view.has_story_to_like():
-        if profile_view.live_marker().exists(Timeout.SHORT):
-            logger.info(f"@{username} is making a live.")
-        return 0
 
     likes_counter = 0
-    fast = always_like_stories
+    fast = always_like_stories or already_open
     pause = (0.1, 0.2) if fast else (0.3, 0.6)
     after_like = (0.1, 0.17) if fast else (0.3, 0.5)
     story_open_sleep = SleepTime.ZERO if fast else SleepTime.DEFAULT
@@ -1283,7 +1511,7 @@ def like_all_profile_stories(
         logger.debug("Watching stories...")
         if not daily_story_likes:
             session_state.totalWatched += 1
-        if always_like_stories:
+        if always_like_stories or already_open:
             like_story()
             return True
         for _ in range(7):
@@ -1294,10 +1522,12 @@ def like_all_profile_stories(
         return True
 
     stories_to_watch: int = get_value(args.stories_count, "Stories count: {}.", 1)
-    if always_like_stories:
-        stories_to_watch = max(stories_to_watch, 15)
-    logger.debug("Open the story container.")
-    profile_view.StoryRing().click(sleep=story_open_sleep)
+    if always_like_stories or already_open:
+        # Daily / list story likes: max 1 story like per account.
+        stories_to_watch = 1
+    if not already_open:
+        logger.debug("Open the story container.")
+        profile_view.StoryRing().click(sleep=story_open_sleep)
     story_view = CurrentStoryView(device)
     story_frame = story_view.getStoryFrame()
     story_frame.wait(story_wait)

@@ -406,7 +406,10 @@ class CoreArguments(Plugin):
             {
                 "arg": "--rate-limit-break",
                 "nargs": None,
-                "help": "minutes to pause when Instagram shows 'Try Again Later' (default 720)",
+                "help": (
+                    "unused legacy option — action-limit pauses now escalate "
+                    "automatically: 1-1.5h → 3h → 8h → 12h → 24h"
+                ),
                 "metavar": 1,
                 "default": "720",
             },

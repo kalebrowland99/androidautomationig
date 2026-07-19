@@ -91,7 +91,10 @@ CONFIG_HELP: dict[str, str] = {
     "working-hours": "The bot only runs during these windows each day. Outside them it waits.",
     "time-delta": "Shift start times by a few random minutes so you don’t begin at exactly the same time every day.",
     "repeat": "Minutes to wait after a session ends before starting the next one.",
-    "rate-limit-break": "Minutes to pause when Instagram shows 'Try Again Later' (default 720 = 12 hours).",
+    "rate-limit-break": (
+        "Legacy field (ignored). Action-limit pauses escalate automatically in a row: "
+        "1–1.5h → 3h → 8h → 12h → 24h. Streak resets after a stretch of successful work."
+    ),
     "total-sessions": "1 runs once. -1 keeps scheduling sessions until you press Stop.",
     "pre-script": "Optional phone script to run before the bot (advanced).",
     "post-script": "Optional phone script to run after the bot (advanced).",
@@ -275,7 +278,7 @@ ACCOUNT_TAB_HELP: dict[str, str] = {
     "comments": "Message templates for comments and DMs.",
     "schedule": "What hours the bot may run and how often it repeats.",
     "reports": "Telegram notifications when sessions complete.",
-    "posting": "Reel posting: videos in post_media/, OpenAI captions, posts per session.",
+    "posting": "Reel posting: videos in post_media/, OpenAI captions, posts per session. Daily story (story_media/ + AI captions) is listed but locked until finished.",
     "files": "Every file in this account’s folder.",
     "raw": "Edit the full config file directly — for advanced users.",
 }

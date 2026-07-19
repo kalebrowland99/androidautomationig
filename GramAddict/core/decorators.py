@@ -33,9 +33,14 @@ def _account_username(session_state, configs):
     return session_state.my_username or getattr(configs.args, "username", None)
 
 
-def _notify_fatal_error(session_state, configs, title: str, details: str) -> None:
+def _notify_fatal_error(session_state, configs, title: str, details: str = "") -> None:
     try:
-        send_telegram_alert(_account_username(session_state, configs), title, details)
+        send_telegram_alert(
+            _account_username(session_state, configs),
+            title,
+            details,
+            stopped=True,
+        )
     except Exception:
         logger.debug("Telegram alert failed", exc_info=True)
 
@@ -186,8 +191,7 @@ def restart(
             _notify_fatal_error(
                 session_state,
                 configs,
-                "Crash limit reached",
-                "Too many crashes this session. Bot is stopping.",
+                "Too many crashes",
             )
             stop_bot(device, sessions, session_state)
         logger.info("Something unexpected happened. Let's try again.")

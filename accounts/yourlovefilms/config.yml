@@ -1,7 +1,7 @@
 app-id: com.instagram.android
 use-cloned-app: false
 allow-untested-ig-version: true
-ensure-vpn: true
+ensure-vpn: false
 vpn-app-name: Shadowrocket
 screen-sleep: false
 screen-record: true
@@ -18,7 +18,7 @@ count-app-crashes: false
 shuffle-jobs: false
 truncate-sources: 8-10
 post-reels: '0'
-feed: 1-2
+feed: '0'
 watch-video-time: 5-15
 watch-photo-time: 1-3
 delete-interacted-users: false
@@ -27,14 +27,14 @@ unfollow-delay: '15'
 delete-removed-followers: true
 telegram-reports: true
 interactions-count: 30-40
-likes-count: 1-2
-likes-percentage: '100'
-stories-count: 1-2
+likes-count: '0'
+likes-percentage: '0'
+stories-count: '1'
 stories-percentage: '100'
 carousel-count: 1-3
 carousel-percentage: 60-70
-follow-percentage: '100'
-follow-limit: '50'
+follow-percentage: '0'
+follow-limit: '0'
 skipped-list-limit: 10-15
 skipped-posts-limit: '5'
 fling-when-skipped: '10'
@@ -54,15 +54,16 @@ end-if-follows-limit-reached: true
 end-if-watches-limit-reached: false
 end-if-comments-limit-reached: false
 end-if-pm-limit-reached: false
-working-hours: [9.00-23.50]
+working-hours: [5.00-23.50]
 time-delta: '1'
 total-sessions: '-1'
-repeat: 25-35
+repeat: 1-2
 max-comments-pro-user: '1'
-comment-percentage: '100'
-interact-percentage: '80'
+comment-percentage: '0'
+interact-percentage: '100'
 skip-top-profile-posts: '3'
 skip-first-row: true
 blogger-followers: [drakewoodfarm, legacyfarmstn, sycamorefarmsevents, thecordelle, thewhitedovebarn, fireflylaneweddings, cedarmontfarm, themonroeon415th, cheekwoodweddings, riverwoodmansion]
+blogger-post-likers: [drakewoodfarm, legacyfarmstn, sycamorefarmsevents, thecordelle, thewhitedovebarn, fireflylaneweddings, cedarmontfarm, themonroeon415th, cheekwoodweddings, riverwoodmansion]
 username: yourlovefilms
 device: 988dd237354e485243

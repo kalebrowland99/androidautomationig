@@ -51,9 +51,11 @@ def telegram_alerts_enabled(telegram_config: dict) -> bool:
 def send_telegram_alert(
     username: Optional[str],
     title: str,
-    details: str,
+    details: str = "",
+    *,
+    stopped: bool = False,
 ) -> bool:
-    """Send an immediate Telegram alert (action block, crash, etc.)."""
+    """Send a short Telegram alert (action block, crash, rate limit, etc.)."""
     if not username:
         return False
     telegram_config = load_telegram_config(username)
@@ -63,14 +65,13 @@ def send_telegram_alert(
     chat_id = telegram_config.get("telegram-chat-id")
     if not token or not chat_id:
         return False
-    stamp = datetime.now().strftime("%I:%M %p")
-    text = (
-        f"⚠️ {title}\n\n"
-        f"Account: @{username}\n"
-        f"Time: {stamp}\n\n"
-        f"{details.strip()}\n\n"
-        "Bot stopped this session."
-    )
+    lines = [f"⚠️ @{username} — {title}"]
+    detail = (details or "").strip()
+    if detail:
+        lines.append(detail)
+    if stopped:
+        lines.append("Stopped.")
+    text = "\n".join(lines)
     response = telegram_bot_send_text(token, chat_id, text, parse_mode=None)
     if response and response.get("ok"):
         logger.info(
@@ -163,44 +164,31 @@ def generate_report(
     followers_now,
     following_now,
 ):
-    return f"""
-            *Stats for {username}*:
-
-            *✨Overview after last activity*
-            • {followers_now} followers ({followers_now - last_session.get("profile", {}).get("followers", 0):+})
-            • {following_now} following ({following_now - last_session.get("profile", {}).get("following", 0):+})
-
-            *🤖 Last session actions*
-            • {last_session["duration"]} minutes of botting
-            • {last_session["total_likes"]} likes
-            • {last_session["total_followed"]} follows
-            • {last_session["total_unfollowed"]} unfollows
-            • {last_session["total_watched"]} stories watched
-            • {last_session["total_comments"]} comments done
-            • {last_session["total_pm"]} PM sent
-
-            *📅 Today's total actions*
-            • {daily_aggregated_data["duration"]} minutes of botting
-            • {daily_aggregated_data["total_likes"]} likes
-            • {daily_aggregated_data["total_followed"]} follows
-            • {daily_aggregated_data["total_unfollowed"]} unfollows
-            • {daily_aggregated_data["total_watched"]} stories watched
-            • {daily_aggregated_data["total_comments"]} comments done
-            • {daily_aggregated_data["total_pm"]} PM sent
-
-            *📈 Trends*
-            • {daily_aggregated_data["followers_gained"]} new followers today
-            • {weekly_average_data["followers_gained"]} new followers this week
-
-            *🗓 7-Day Average*
-            • {weekly_average_data["duration"] / 7:.0f} minutes of botting
-            • {weekly_average_data["total_likes"] / 7:.0f} likes
-            • {weekly_average_data["total_followed"] / 7:.0f} follows
-            • {weekly_average_data["total_unfollowed"] / 7:.0f} unfollows
-            • {weekly_average_data["total_watched"] / 7:.0f} stories watched
-            • {weekly_average_data["total_comments"] / 7:.0f} comments done
-            • {weekly_average_data["total_pm"] / 7:.0f} PM sent
-        """
+    prev_followers = last_session.get("profile", {}).get("followers", 0) or 0
+    delta = followers_now - prev_followers
+    session_bits = [
+        f"{last_session['duration']}m",
+        f"{last_session['total_likes']} likes",
+        f"{last_session['total_followed']} follows",
+        f"{last_session['total_watched']} stories",
+    ]
+    if last_session.get("total_unfollowed"):
+        session_bits.append(f"{last_session['total_unfollowed']} unfollows")
+    if last_session.get("total_comments"):
+        session_bits.append(f"{last_session['total_comments']} comments")
+    today_bits = [
+        f"{daily_aggregated_data.get('duration', 0)}m",
+        f"{daily_aggregated_data.get('total_likes', 0)} likes",
+        f"{daily_aggregated_data.get('total_followed', 0)} follows",
+        f"{daily_aggregated_data.get('total_watched', 0)} stories",
+    ]
+    gained = daily_aggregated_data.get("followers_gained", 0)
+    return (
+        f"*@{username}*\n"
+        f"{followers_now} followers ({delta:+}) · {following_now} following\n"
+        f"Session: {' · '.join(session_bits)}\n"
+        f"Today: {' · '.join(today_bits)} · {gained:+} followers"
+    )
 
 
 def weekly_average(daily_aggregated_data, today) -> dict:

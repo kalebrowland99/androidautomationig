@@ -67,11 +67,24 @@ class InteractBloggerFollowers_Following(Plugin):
         # IMPORTANT: in each job we assume being on the top of the Profile tab already
         if self.args.blogger_followers is not None:
             sources = [s for s in self.args.blogger_followers if s.strip()]
+            is_followers_job = True
         else:
             sources = [s for s in self.args.blogger_following if s.strip()]
+            is_followers_job = False
 
-        # Start
-        for source in sample_sources(sources, self.args.truncate_sources):
+        account_key = (
+            getattr(self.session_state, "my_username", None)
+            or getattr(self.args, "username", None)
+            or ""
+        )
+
+        # Sample an initial set, then keep draining sources discovered live by
+        # follow vision (music videographers / wedding photo-video vendors).
+        pending = list(sample_sources(sources, self.args.truncate_sources))
+        seen = {s.lstrip("@").strip().casefold() for s in pending if s.strip()}
+
+        while pending:
+            source = pending.pop(0)
             (
                 active_limits_reached,
                 _,
@@ -80,7 +93,7 @@ class InteractBloggerFollowers_Following(Plugin):
             limit_reached = active_limits_reached or actions_limit_reached
 
             self.state = State()
-            is_myself = source[1:] == self.session_state.my_username
+            is_myself = source.lstrip("@") == self.session_state.my_username
             its_you = is_myself and " (it's you)" or ""
             logger.info(
                 f"Handle {source} {its_you}", extra={"color": f"{Style.BRIGHT}"}
@@ -131,6 +144,25 @@ class InteractBloggerFollowers_Following(Plugin):
                     limit_type=self.session_state.Limit.ALL, output=True
                 )
                 break
+
+            if is_followers_job and account_key:
+                try:
+                    from GramAddict.core.follow_vision_account import (
+                        drain_discovered_bloggers,
+                    )
+
+                    for discovered in drain_discovered_bloggers(account_key):
+                        key = discovered.lstrip("@").strip().casefold()
+                        if not key or key in seen:
+                            continue
+                        seen.add(key)
+                        pending.append(discovered)
+                        logger.info(
+                            f"Queued newly found blogger-followers source @{discovered} (live).",
+                            extra={"color": f"{Style.BRIGHT}"},
+                        )
+                except Exception as exc:
+                    logger.debug("Could not drain discovered bloggers: %s", exc)
 
     def handle_blogger(
         self,

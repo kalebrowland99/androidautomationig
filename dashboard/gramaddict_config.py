@@ -278,12 +278,22 @@ def _load_story_likes_meta(account_dir: Path) -> dict[str, Any]:
 
 
 def _save_story_likes_meta(
-    account_dir: Path, *, enabled: bool, limit: str = ""
+    account_dir: Path, *, enabled: bool, limit: str = "", last_position: int | None = None
 ) -> None:
+    # Load existing metadata to preserve fields we're not updating
+    existing = _load_story_likes_meta(account_dir)
+    
     payload: dict[str, Any] = {"enabled": bool(enabled)}
     cleaned_limit = str(limit or "").strip()
     if cleaned_limit:
         payload["limit"] = cleaned_limit
+    
+    # Preserve or update last_position
+    if last_position is not None:
+        payload["last_position"] = int(last_position)
+    elif "last_position" in existing:
+        payload["last_position"] = existing["last_position"]
+    
     _save_yaml(account_dir / STORY_LIKES_META_FILE, payload)
 
 
@@ -503,6 +513,7 @@ def sync_config_for_bot(account_id: str, data: dict[str, Any]) -> dict[str, Any]
         cleaned_story = _read_line_list_file(account_dir / STORY_LIKES_LIST_FILE)
     if isinstance(story_usernames, list) or cleaned_story:
         _write_line_list_file(account_dir / STORY_LIKES_LIST_FILE, cleaned_story)
+    # This will automatically preserve the existing last_position
     _save_story_likes_meta(account_dir, enabled=story_enabled, limit=story_limit)
     if story_enabled and cleaned_story:
         out[STORY_LIKES_JOB_KEY] = [f"{STORY_LIKES_LIST_FILE} {story_limit or len(cleaned_story)}"]
@@ -1027,7 +1038,7 @@ def list_accounts() -> list[dict[str, Any]]:
                 "config_path": str(config_path.relative_to(PROJECT_ROOT)),
                 "running": running,
                 "last_error": recent_bot_error(username),
-                "progress": _live_progress_snapshot(username) if running else None,
+                "progress": _progress_for_account_status(username, running=running),
                 "disabled": disabled_info is not None,
                 "disabled_reason": (disabled_info or {}).get("reason", ""),
                 "note": get_account_note(folder.name),
@@ -1071,6 +1082,20 @@ def create_account(name: str) -> dict[str, Any]:
     data["username"] = name.strip()
     _save_account_config_yaml(config_path, data)
     (folder / "post_media").mkdir(exist_ok=True)
+    (folder / "story_media").mkdir(exist_ok=True)
+    daily_story_path = folder / "daily_story.yml"
+    if not daily_story_path.is_file():
+        _save_yaml(
+            daily_story_path,
+            {
+                "enabled": False,
+                "posts-per-day": 1,
+                "caption-prompt": (
+                    "Write one short casual Instagram story caption. "
+                    "Return only the caption text — no quotes, no hashtags."
+                ),
+            },
+        )
     return get_account(account_id)
 
 
@@ -1113,6 +1138,116 @@ def account_id_for_device(serial: str) -> str | None:
 # Stored outside config.yml (run.py's parser only understands the `device` key),
 # as a central map of hardware_id → account_id.
 DEVICE_LINKS_FILE = ACCOUNTS_DIR / ".device_links.json"
+
+# Farm-page checkbox selection — used by the daily morning starter so it starts
+# whatever phones are currently checked (not a hardcoded account list).
+FARM_SELECTION_FILE = ACCOUNTS_DIR / ".farm_selection.json"
+
+
+def get_farm_selection() -> dict[str, Any]:
+    default = {"serials": [], "updated_at": None}
+    if not FARM_SELECTION_FILE.is_file():
+        return default
+    try:
+        data = json.loads(FARM_SELECTION_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return default
+    if not isinstance(data, dict):
+        return default
+    serials = data.get("serials") or []
+    if not isinstance(serials, list):
+        serials = []
+    cleaned = [str(s).strip() for s in serials if str(s).strip()]
+    return {
+        "serials": cleaned,
+        "updated_at": data.get("updated_at"),
+    }
+
+
+def save_farm_selection(serials: list[str]) -> dict[str, Any]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for serial in serials or []:
+        value = str(serial or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        cleaned.append(value)
+    payload = {
+        "serials": cleaned,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
+    with atomic_write(FARM_SELECTION_FILE, overwrite=True, encoding="utf-8") as handle:
+        json.dump(payload, handle, indent=2)
+    return payload
+
+
+def resolve_farm_selection_targets(
+    serials: Optional[list[str]] = None,
+) -> dict[str, Any]:
+    """Map Farm-checked serials → runnable account targets."""
+    if serials is None:
+        serials = get_farm_selection().get("serials") or []
+    accounts = {a["id"]: a for a in list_accounts()}
+    # Also index by current device serial on each account.
+    by_device: dict[str, dict[str, Any]] = {}
+    for acct in accounts.values():
+        device = str(acct.get("device") or "").strip()
+        if device:
+            by_device[device] = acct
+
+    targets: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for serial in serials:
+        serial = str(serial or "").strip()
+        if not serial:
+            continue
+        acct = by_device.get(serial)
+        if acct is None:
+            # Fall back to username-for-device / hardware link resolution.
+            username = username_for_device(serial)
+            if username:
+                for candidate in accounts.values():
+                    if str(candidate.get("username") or "").strip().lower() == username.lower():
+                        acct = candidate
+                        break
+                    if candidate.get("id") == username:
+                        acct = candidate
+                        break
+        if acct is None:
+            skipped.append({"serial": serial, "reason": "no linked account"})
+            continue
+        if account_disabled_info(acct["id"]) is not None:
+            skipped.append(
+                {
+                    "serial": serial,
+                    "account_id": acct["id"],
+                    "reason": "disabled",
+                }
+            )
+            continue
+        if _account_bot_running(acct["id"]):
+            skipped.append(
+                {
+                    "serial": serial,
+                    "account_id": acct["id"],
+                    "reason": "already running",
+                }
+            )
+            continue
+        targets.append(
+            {
+                "serial": serial,
+                "account_id": acct["id"],
+                "username": acct.get("username") or acct["id"],
+            }
+        )
+    return {
+        "serials": list(serials),
+        "targets": targets,
+        "skipped": skipped,
+    }
 
 
 def _load_device_links() -> dict[str, str]:
@@ -1535,6 +1670,68 @@ def is_story_likes_log_line(message: str) -> bool:
     return any(marker in lower for marker in _STORY_LIKES_MAIN_LOG_MARKERS)
 
 
+def get_successfully_liked_accounts(account_id: str) -> dict[str, Any]:
+    """Extract accounts that had stories successfully liked from the story likes log."""
+    username = _account_username(account_id)
+    dedicated = LOGS_DIR / f"{username}_story_likes.log"
+    
+    liked_accounts: dict[str, dict[str, Any]] = {}
+    
+    if not dedicated.is_file():
+        return {
+            "account_id": account_id,
+            "username": username,
+            "liked_accounts": [],
+            "total_count": 0,
+        }
+    
+    # Parse log file for successful likes
+    # Format: [MM/DD HH:MM:SS AM/PM] @username: liked X story segment(s)
+    log_pattern = re.compile(
+        r'^\[(\d{2}/\d{2} \d{1,2}:\d{2}:\d{2} [AP]M)\] @([^:]+): liked (\d+) story',
+        re.IGNORECASE
+    )
+    
+    try:
+        with open(dedicated, 'r', encoding='utf-8') as f:
+            for line in f:
+                match = log_pattern.match(line.strip())
+                if match:
+                    timestamp_str, target_username, count_str = match.groups()
+                    target_username = target_username.strip().lstrip('@')
+                    count = int(count_str)
+                    
+                    # Track the most recent like for each account
+                    if target_username not in liked_accounts:
+                        liked_accounts[target_username] = {
+                            "username": target_username,
+                            "timestamp": timestamp_str,
+                            "segments_liked": count,
+                            "total_likes": count,
+                        }
+                    else:
+                        # Update with most recent timestamp and accumulate total
+                        liked_accounts[target_username]["timestamp"] = timestamp_str
+                        liked_accounts[target_username]["segments_liked"] = count
+                        liked_accounts[target_username]["total_likes"] += count
+    except OSError:
+        pass
+    
+    # Convert to sorted list (most recent first)
+    liked_list = sorted(
+        liked_accounts.values(),
+        key=lambda x: x["timestamp"],
+        reverse=True
+    )
+    
+    return {
+        "account_id": account_id,
+        "username": username,
+        "liked_accounts": liked_list,
+        "total_count": len(liked_list),
+    }
+
+
 # How old the most recent error may be and still count as "recent" (surfaced in
 # the UI). Errors older than this are treated as stale and hidden.
 RECENT_ERROR_WINDOW = timedelta(hours=24)
@@ -1700,16 +1897,21 @@ def _live_progress_snapshot(username: str) -> Optional[dict[str, Any]]:
     if not isinstance(data, dict):
         return None
     limits = data.get("limits") or {}
-    # Sleeping = between-session repeat break. Only trust the flag while the
-    # scheduled resume is still in the future, so a stale flag can't linger.
+    # Sleeping = between-session or action-limit pause. Only trust the flag
+    # while the scheduled resume is still in the future.
     sleeping = bool(data.get("sleeping"))
     next_session_at = data.get("next_session_at")
+    rate_limited = bool(data.get("rate_limited"))
     if sleeping and next_session_at:
         try:
             if datetime.fromisoformat(next_session_at) <= datetime.now():
                 sleeping = False
+                rate_limited = False
+                next_session_at = None
         except (ValueError, TypeError):
             pass
+    if not sleeping:
+        rate_limited = False
     return {
         "likes": data.get("total_likes", 0),
         "likes_limit": limits.get("likes"),
@@ -1725,8 +1927,22 @@ def _live_progress_snapshot(username: str) -> Optional[dict[str, Any]]:
         "daily_story_likes_limit": data.get("daily_story_likes_limit"),
         "current_job": data.get("current_job"),
         "sleeping": sleeping,
+        "rate_limited": rate_limited,
         "next_session_at": next_session_at if sleeping else None,
     }
+
+
+def _progress_for_account_status(
+    username: str, *, running: bool
+) -> Optional[dict[str, Any]]:
+    """Progress for Farm polling — keep action-limit pauses visible even if the
+    process died mid-sleep, as long as resume time is still in the future."""
+    progress = _live_progress_snapshot(username)
+    if running:
+        return progress
+    if progress and progress.get("rate_limited") and progress.get("next_session_at"):
+        return progress
+    return None
 
 
 def accounts_status() -> list[dict[str, Any]]:
@@ -1749,7 +1965,7 @@ def accounts_status() -> list[dict[str, Any]]:
                 "id": folder.name,
                 "running": running,
                 "last_error": recent_bot_error(username),
-                "progress": _live_progress_snapshot(username) if running else None,
+                "progress": _progress_for_account_status(username, running=running),
                 "disabled": disabled_info is not None,
                 "disabled_reason": (disabled_info or {}).get("reason", ""),
                 "story_likes_enabled": _story_likes_enabled(folder.name),
@@ -1778,8 +1994,9 @@ def read_bot_log(account_id: str, *, max_lines: int = 500) -> dict[str, Any]:
     """
     username = _account_username(account_id)
     path = LOGS_DIR / f"{username}.log"
-    # Read a generous byte tail, then keep only the last `max_lines` lines.
-    approx_bytes = max(65536, max_lines * 220)
+    # Read a generous byte tail to ensure we get logs from previous days.
+    # Use at least 512KB to capture multiple days of history.
+    approx_bytes = max(524288, max_lines * 220)
     lines = _read_log_tail(path, max_bytes=approx_bytes)
     if max_lines > 0:
         lines = lines[-max_lines:]

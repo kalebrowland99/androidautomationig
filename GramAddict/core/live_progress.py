@@ -30,6 +30,7 @@ def write_live_progress(
     current_job: Optional[str] = None,
     sleeping: bool = False,
     next_session_at: Optional[str] = None,
+    rate_limited: bool = False,
 ) -> None:
     if not username:
         return
@@ -50,6 +51,8 @@ def write_live_progress(
         "current_job": current_job,
         "sleeping": bool(sleeping),
         "next_session_at": next_session_at,
+        # True while paused for Instagram "Try Again Later" / action limit.
+        "rate_limited": bool(rate_limited),
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "session_started_at": (
             session_state.startTime.isoformat(timespec="seconds")

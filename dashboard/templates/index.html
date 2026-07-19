@@ -48,7 +48,7 @@
             --brand: #6366f1;
         }
     </style>
-    <link rel="stylesheet" href="/static/dashboard.css?v=49">
+    <link rel="stylesheet" href="/static/dashboard.css?v=52">
 </head>
 <body class="min-h-screen bg-white text-foreground antialiased brand-gramaddict">
     <div id="page-banner"></div>
@@ -125,11 +125,11 @@
                     <label class="farm-batch-mode" for="farm-run-mode">
                         <span class="farm-batch-mode-label">Selected phones run</span>
                         <select id="farm-run-mode" class="ga-input farm-run-mode-select" onchange="onFarmRunModeChange()">
-                            <option value="consecutive">One after another</option>
                             <option value="parallel">All at once (parallel)</option>
+                            <option value="consecutive">One after another</option>
                         </select>
                     </label>
-                    <p class="farm-batch-hint">Parallel starts every selected bot together (heavier on USB and RAM). Consecutive waits for each session to finish before starting the next.</p>
+                    <p class="farm-batch-hint">Checked phones are what the daily 5 AM auto-start runs (always in parallel). Change the checkboxes anytime — no script edit needed. Manual “Run selected” can still use consecutive if you want.</p>
                 </div>
 
                 <div class="grid lg:grid-cols-5 gap-5 md:gap-6 items-start">
@@ -173,7 +173,13 @@
                         <div id="story-likes-log-panel" class="farm-story-log-panel hidden flex flex-col min-h-0 overflow-hidden">
                             <div class="flex items-center justify-between mb-2 shrink-0">
                                 <h2 class="text-sm font-semibold">Daily story likes</h2>
-                                <button type="button" class="btn-ghost btn-sm" onclick="clearStoryLikesLog()">Clear</button>
+                                <div class="flex gap-2">
+                                    <button type="button" class="btn-ghost btn-sm" onclick="showSuccessfulStoryLikes()" title="Show accounts with successfully liked stories">
+                                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="inline-block mr-1"><path d="M12 22c5.523 0 10-4.477 10-10S17.523 2 12 2 2 6.477 2 12s4.477 10 10 10z"/><path d="m9 12 2 2 4-4"/></svg>
+                                        Success
+                                    </button>
+                                    <button type="button" class="btn-ghost btn-sm" onclick="clearStoryLikesLog()">Clear</button>
+                                </div>
                             </div>
                             <div id="story-likes-log" class="farm-story-log-scroll overflow-y-auto pr-1 min-h-0"></div>
                         </div>
@@ -343,8 +349,44 @@
                                     </div>
                                 </div>
                                 <div class="account-posting-section-divider"></div>
+                                <section id="daily-story-panel" class="daily-story-panel is-locked" aria-disabled="true">
+                                    <div class="daily-story-panel-head">
+                                        <h3 class="account-posting-subhead">Daily story</h3>
+                                        <span class="daily-story-lock-badge">Locked</span>
+                                    </div>
+                                    <p class="account-posting-note">
+                                        Drop photos/videos into <code>story_media/</code>. AI writes the caption and the bot posts a story.
+                                        This feature is locked for now — finish the bot side later.
+                                    </p>
+                                    <div class="daily-story-locked-fields" inert>
+                                        <label class="ga-check">
+                                            <input type="checkbox" class="ui-checkbox" disabled>
+                                            <span class="ga-check-label">Enable daily story posting</span>
+                                        </label>
+                                        <div class="field">
+                                            <label>Stories per day</label>
+                                            <input type="text" class="ga-input" value="1" disabled>
+                                        </div>
+                                        <div class="field">
+                                            <label>Caption prompt</label>
+                                            <textarea class="ga-input" rows="3" disabled placeholder="AI will write the story caption from this prompt…"></textarea>
+                                        </div>
+                                        <div class="daily-story-dropzone" aria-hidden="true">
+                                            <p class="daily-story-dropzone-title">story_media/</p>
+                                            <p class="daily-story-dropzone-hint">Add images or videos here later</p>
+                                        </div>
+                                    </div>
+                                </section>
+                                <div class="account-posting-section-divider"></div>
                                 <h3 class="account-posting-subhead">Follow vision filter</h3>
                                 <p class="account-posting-note">Screenshots each profile before interacting. OpenAI Vision must return the pass phrase from your prompt (e.g. <code>potential musician</code> or <code>potential couple</code>). Uses the OpenAI key from Reel posting unless set separately.</p>
+                                <p class="account-posting-note account-posting-note-emphasize">
+                                    <strong>Save vendors &amp; add to blogger-followers live</strong> works for both accounts — <strong>Tennessee only</strong>
+                                    (AI checks the IG bio/location for TN, Tennessee, area codes, and TN cities including abbreviations like Nash, Mempho, Knox, Chatt).
+                                    <strong>615FILMS</strong> saves TN music videographers to <code>found_videographers_tn.txt</code>;
+                                    <strong>YourLoveFilms</strong> saves TN wedding photographers/videographers to <code>found_wedding_vendors.txt</code>.
+                                    Both get appended to <code>blogger-followers</code> during the run. Non-TN vendors are skipped.
+                                </p>
                                 <div id="ga-form-follow-vision" class="adv-grid-2 account-posting-fields"></div>
                                 <div class="account-posting-prompts">
                                     <div class="field">
@@ -615,7 +657,24 @@
         </div>
     </div>
 
+    <!-- STORY LIKES SUCCESS MODAL -->
+    <div id="story-likes-success-modal" class="modal-overlay hidden" onclick="if (event.target === this) hideSuccessfulStoryLikes()">
+        <div class="modal-dialog" style="max-width: 600px;">
+            <header class="modal-header">
+                <h2 class="modal-title">Successfully Liked Stories</h2>
+                <button type="button" class="modal-close" onclick="hideSuccessfulStoryLikes()" aria-label="Close">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                </button>
+            </header>
+            <div class="modal-body">
+                <div id="story-likes-success-content" style="max-height: 500px; overflow-y: auto;">
+                    <div class="text-center text-muted-foreground py-4">Loading...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script>window.__DEBUG_GROUP_COUNTS__ = __DEBUG_BOOTSTRAP__;</script>
-    <script src="/static/dashboard.js?v=60"></script>
+    <script src="/static/dashboard.js?v=62"></script>
 </body>
 </html>

@@ -206,8 +206,9 @@ def start_bot(**kwargs):
                 logger.critical("VPN check failed. Aborting session.")
                 send_telegram_alert(
                     configs.username or session_state.my_username,
-                    "VPN check failed",
-                    f"Could not connect {vpn_app} before opening Instagram.",
+                    "VPN failed",
+                    vpn_app,
+                    stopped=True,
                 )
                 stop_bot(device, sessions, session_state, was_sleeping=False)
                 continue
@@ -289,9 +290,8 @@ def start_bot(**kwargs):
             )
             send_telegram_alert(
                 configs.username or session_state.my_username,
-                "Profile could not load",
-                "Could not read username, posts, followers, or following. "
-                "Often a soft-ban or connection issue. Check the crash screenshot.",
+                "Profile won't load",
+                stopped=True,
             )
             save_crash(device)
             stop_bot(device, sessions, session_state)

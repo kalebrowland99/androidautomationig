@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
+import random
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Tuple
 
 from atomicwrites import atomic_write
 
@@ -20,6 +21,80 @@ logger = logging.getLogger(__name__)
 
 HISTORY_FILENAME = "rate_limit_history.json"
 MAX_EVENTS = 50
+
+# Consecutive action-limit pauses ("in a row"). Step 1 is a random range.
+# After a successful stretch past the prior break, the streak resets to 1.
+RATE_LIMIT_BREAK_LADDER_MINUTES = (
+    (60, 90),  # 1st: 1–1.5 hours
+    180,  # 2nd: 3 hours
+    480,  # 3rd: 8 hours
+    720,  # 4th: 12 hours
+    1440,  # 5th+: 24 hours
+)
+# If we get limited again within this many minutes after the previous break
+# would have ended, count it as the next step in the ladder.
+_STREAK_GRACE_AFTER_BREAK_MINUTES = 6 * 60
+
+
+def _parse_event_time(value: Any) -> Optional[datetime]:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _minutes_for_streak(streak: int) -> int:
+    """Map 1-based consecutive streak → pause minutes."""
+    ladder = RATE_LIMIT_BREAK_LADDER_MINUTES
+    idx = max(0, min(int(streak) - 1, len(ladder) - 1))
+    step = ladder[idx]
+    if isinstance(step, tuple):
+        low, high = int(step[0]), int(step[1])
+        if high < low:
+            low, high = high, low
+        return random.randint(low, high)
+    return int(step)
+
+
+def _load_events(username: str) -> list[dict[str, Any]]:
+    path = _history_path(username)
+    if not path.is_file():
+        return []
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    events = raw.get("events") if isinstance(raw, dict) else raw
+    if not isinstance(events, list):
+        return []
+    return [e for e in events if isinstance(e, dict)]
+
+
+def next_rate_limit_break_minutes(username: str) -> Tuple[int, int]:
+    """Return ``(break_minutes, streak)`` for the next action-limit pause.
+
+    Streak escalates when limits keep happening in a row (hit again soon after
+    the previous break ends). Otherwise it resets to 1 (1–1.5h).
+    """
+    safe = (username or "").strip().lstrip("@")
+    events = _load_events(safe)
+    streak = 1
+    if events:
+        last = events[0]
+        # Events from before progressive pauses have no streak — start fresh.
+        if last.get("streak") is not None:
+            last_at = _parse_event_time(last.get("at"))
+            last_break = int(last.get("break_minutes") or 0)
+            last_streak = max(1, int(last.get("streak") or 1))
+            if last_at is not None and last_break >= 0:
+                elapsed_min = (datetime.now() - last_at).total_seconds() / 60.0
+                # Still "in a row" if within prior break + grace of last hit.
+                if elapsed_min <= last_break + _STREAK_GRACE_AFTER_BREAK_MINUTES:
+                    streak = last_streak + 1
+    minutes = _minutes_for_streak(streak)
+    return minutes, streak
 
 
 def _history_path(username: str) -> Path:
@@ -74,6 +149,7 @@ def record_rate_limit_event(
     session_state: "SessionState",
     *,
     break_minutes: int,
+    streak: int = 1,
     current_job: Optional[str] = None,
 ) -> None:
     """Append one rate-limit hit with counters at detection time."""
@@ -94,6 +170,7 @@ def record_rate_limit_event(
         "at": datetime.now().isoformat(timespec="seconds"),
         "job": job,
         "break_minutes": int(break_minutes),
+        "streak": max(1, int(streak)),
         "counts": counts,
     }
 
@@ -118,9 +195,12 @@ def record_rate_limit_event(
         with atomic_write(path, overwrite=True, encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)
         logger.info(
-            "Recorded Instagram rate limit snapshot for @%s (job=%s, daily_story_today=%s).",
+            "Recorded Instagram rate limit snapshot for @%s "
+            "(job=%s, streak=%s, break=%sm, daily_story_today=%s).",
             safe,
             job or "?",
+            event["streak"],
+            break_minutes,
             daily_today if daily_today is not None else counts.get("daily_story_accounts_session"),
         )
     except OSError as exc:
