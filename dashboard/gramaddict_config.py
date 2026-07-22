@@ -1038,7 +1038,9 @@ def list_accounts() -> list[dict[str, Any]]:
                 "config_path": str(config_path.relative_to(PROJECT_ROOT)),
                 "running": running,
                 "last_error": recent_bot_error(username),
-                "progress": _progress_for_account_status(username, running=running),
+                "progress": _progress_for_account_status(
+                    username, running=running, account_id=folder.name
+                ),
                 "disabled": disabled_info is not None,
                 "disabled_reason": (disabled_info or {}).get("reason", ""),
                 "note": get_account_note(folder.name),
@@ -1885,6 +1887,31 @@ def _account_username(account_id: str) -> str:
     return str(data.get("username") or account_id)
 
 
+def _empty_progress() -> dict[str, Any]:
+    return {
+        "likes": 0,
+        "likes_limit": None,
+        "follows": 0,
+        "follows_limit": None,
+        "comments": 0,
+        "comments_limit": None,
+        "watched": 0,
+        "watches_limit": None,
+        "story_likes": 0,
+        "story_likes_limit": None,
+        "story_accounts_liked": 0,
+        "daily_story_likes": 0,
+        "daily_story_likes_limit": None,
+        "current_job": None,
+        "sleeping": False,
+        "rate_limited": False,
+        "next_session_at": None,
+        "updated_at": None,
+        "state": "stopped",
+        "today": None,
+    }
+
+
 def _live_progress_snapshot(username: str) -> Optional[dict[str, Any]]:
     """Compact live counters + limits for display under the account handle."""
     path = _live_progress_path(username)
@@ -1912,6 +1939,17 @@ def _live_progress_snapshot(username: str) -> Optional[dict[str, Any]]:
             pass
     if not sleeping:
         rate_limited = False
+    # Incomplete live_progress during an action-limit break (missing resume time).
+    if rate_limited and not next_session_at:
+        try:
+            from GramAddict.core.rate_limit_history import active_rate_limit_resume_at
+
+            hist_resume = active_rate_limit_resume_at(username)
+        except Exception:
+            hist_resume = None
+        if hist_resume:
+            sleeping = True
+            next_session_at = hist_resume
     return {
         "likes": data.get("total_likes", 0),
         "likes_limit": limits.get("likes"),
@@ -1923,26 +1961,128 @@ def _live_progress_snapshot(username: str) -> Optional[dict[str, Any]]:
         "watches_limit": limits.get("watches"),
         "story_likes": data.get("total_story_likes", 0),
         "story_likes_limit": limits.get("watches"),
+        "story_accounts_liked": data.get("total_story_accounts_liked", 0),
         "daily_story_likes": data.get("total_daily_story_accounts", 0),
         "daily_story_likes_limit": data.get("daily_story_likes_limit"),
         "current_job": data.get("current_job"),
         "sleeping": sleeping,
         "rate_limited": rate_limited,
         "next_session_at": next_session_at if sleeping else None,
+        "updated_at": data.get("updated_at"),
+        "today": data.get("today") if isinstance(data.get("today"), dict) else None,
     }
 
 
+def _enrich_today_progress(
+    progress: dict[str, Any], *, account_id: str, username: str, running: bool
+) -> dict[str, Any]:
+    """Attach Today x/goal for Farm — goals are display-only and never stop the bot."""
+    try:
+        from GramAddict.core.day_stats import (
+            daily_goals_from_config,
+            today_totals_from_disk,
+        )
+
+        cfg = {}
+        cfg_path = ACCOUNTS_DIR / account_id / "config.yml"
+        if cfg_path.is_file():
+            try:
+                import yaml
+
+                loaded = yaml.safe_load(cfg_path.read_text(encoding="utf-8")) or {}
+                if isinstance(loaded, dict):
+                    cfg = loaded
+            except Exception:
+                cfg = {}
+        goals = daily_goals_from_config(cfg)
+
+        live_today = progress.get("today")
+        if isinstance(live_today, dict) and running:
+            likes = int(live_today.get("likes") or 0)
+            stories = int(live_today.get("story_likes") or 0)
+            story_accounts = int(live_today.get("story_accounts_liked") or 0)
+            follows = int(live_today.get("follows") or 0)
+        else:
+            totals = today_totals_from_disk(username)
+            likes = totals["likes"]
+            stories = totals["story_likes"]
+            story_accounts = totals.get("story_accounts_liked", 0)
+            follows = totals["follows"]
+            # Mid-session: finished sessions on disk + current live counters.
+            if (
+                running
+                and not progress.get("sleeping")
+                and not progress.get("rate_limited")
+            ):
+                likes += int(progress.get("likes") or 0)
+                stories += int(
+                    progress.get("story_likes") or progress.get("watched") or 0
+                )
+                story_accounts += int(progress.get("story_accounts_liked") or 0)
+                follows += int(progress.get("follows") or 0)
+
+        progress["today"] = {
+            "likes": likes,
+            "story_likes": stories,
+            "story_accounts_liked": story_accounts,
+            "follows": follows,
+            "likes_goal": goals["likes"],
+            "story_likes_goal": goals["stories"],
+            "follows_goal": goals["follows"],
+        }
+    except Exception:
+        progress.setdefault("today", None)
+    return progress
+
+
 def _progress_for_account_status(
-    username: str, *, running: bool
-) -> Optional[dict[str, Any]]:
-    """Progress for Farm polling — keep action-limit pauses visible even if the
-    process died mid-sleep, as long as resume time is still in the future."""
-    progress = _live_progress_snapshot(username)
-    if running:
-        return progress
-    if progress and progress.get("rate_limited") and progress.get("next_session_at"):
-        return progress
-    return None
+    username: str, *, running: bool, account_id: Optional[str] = None
+) -> dict[str, Any]:
+    """Always return Farm status so Stopped vs Waiting is never blank.
+
+    States:
+      - running — process alive, working a job
+      - waiting — process alive, between-session sleep (resume time set)
+      - action_limit — Instagram cooldown (resume time set; process may be dead)
+      - stopped — process not running and not in an active cooldown
+    """
+    progress = _live_progress_snapshot(username) or _empty_progress()
+    acct_id = account_id or username
+
+    # Process dead: recover action-limit resume from history if needed.
+    if not running:
+        if not (progress.get("rate_limited") and progress.get("next_session_at")):
+            try:
+                from GramAddict.core.rate_limit_history import active_rate_limit_resume_at
+
+                hist_resume = active_rate_limit_resume_at(username)
+            except Exception:
+                hist_resume = None
+            if hist_resume:
+                progress["rate_limited"] = True
+                progress["sleeping"] = True
+                progress["next_session_at"] = hist_resume
+
+    if progress.get("rate_limited") and progress.get("next_session_at"):
+        progress["state"] = "action_limit"
+        progress["sleeping"] = True
+    elif running and progress.get("sleeping") and progress.get("next_session_at"):
+        progress["state"] = "waiting"
+    elif running:
+        progress["state"] = "running"
+        progress["sleeping"] = False
+        # Don't show a stale between-session time while actively working.
+        if not progress.get("rate_limited"):
+            progress["next_session_at"] = None
+    else:
+        progress["state"] = "stopped"
+        progress["sleeping"] = False
+        progress["rate_limited"] = False
+        progress["next_session_at"] = None
+
+    return _enrich_today_progress(
+        progress, account_id=acct_id, username=username, running=running
+    )
 
 
 def accounts_status() -> list[dict[str, Any]]:
@@ -1965,7 +2105,9 @@ def accounts_status() -> list[dict[str, Any]]:
                 "id": folder.name,
                 "running": running,
                 "last_error": recent_bot_error(username),
-                "progress": _progress_for_account_status(username, running=running),
+                "progress": _progress_for_account_status(
+                    username, running=running, account_id=folder.name
+                ),
                 "disabled": disabled_info is not None,
                 "disabled_reason": (disabled_info or {}).get("reason", ""),
                 "story_likes_enabled": _story_likes_enabled(folder.name),

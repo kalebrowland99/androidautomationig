@@ -9,6 +9,7 @@ from colorama import Fore
 
 from GramAddict.core.device_facade import DeviceFacade, Direction, Timeout
 from GramAddict.core.interaction import (
+    find_list_row_story_ring,
     like_all_profile_stories,
     like_stories_from_list_row,
     list_story_likes_only,
@@ -78,7 +79,47 @@ def item_at_or_below_y(item, y_top: Optional[int]) -> bool:
     bounds = item.get_bounds()
     if not bounds:
         return False
-    return bounds.get("top", 0) >= y_top
+    return int(bounds.get("top", 0)) >= int(y_top)
+
+
+def visible_list_rows_top_to_bottom(
+    user_list,
+    *,
+    username_from_row,
+    row_height: int,
+    suggested_top: Optional[int] = None,
+) -> list:
+    """Snapshot visible list rows sorted top→bottom by screen Y.
+
+    Instagram/UiAutomator child order is not always visual order — sorting
+    keeps story-ring likes walking usernames sequentially down the screen.
+    """
+    rows = []
+    seen = set()
+    try:
+        for item in user_list:
+            try:
+                if item_at_or_below_y(item, suggested_top):
+                    break
+                cur_row_height = item.get_height()
+                if cur_row_height < row_height:
+                    continue
+                username = username_from_row(item)
+                if not username:
+                    continue
+                key = username.casefold()
+                if key in seen:
+                    continue
+                bounds = item.get_bounds() or {}
+                top = int(bounds.get("top", 0))
+                seen.add(key)
+                rows.append((top, username, item))
+            except DeviceFacade.JsonRpcError:
+                continue
+    except IndexError:
+        pass
+    rows.sort(key=lambda r: r[0])
+    return [(username, item) for _, username, item in rows]
 
 
 def find_see_more_button(device, resource_id):
@@ -349,6 +390,14 @@ def interact_list_story_ring(
       True  — story was opened/liked; caller should rescan the list
       None  — no ring / skip; caller should continue to the next row
     """
+    if session_state.check_limit(
+        limit_type=session_state.Limit.WATCHES, output=True
+    ):
+        logger.info(
+            "Reached total watch limit — stopping list story likes.",
+            extra={"color": f"{Fore.GREEN}"},
+        )
+        return False
     watched = like_stories_from_list_row(
         device, row, username, self.args, session_state
     )
@@ -753,19 +802,45 @@ def handle_daily_story_likes_from_file(self, device, parameter_passed, storage):
             # blank transition between profiles.
             processed_users += 1
             register_daily_story_account(self.session_state)
-            
+
             # Move to next position
             current_position = next_position
-            
+
             # Save progress after each successful check
             save_metadata(current_position, failed_loads)
-        
+
+            # Pace between accounts — one-shotting hundreds of deep-link
+            # opens is what triggers Instagram "Try Again Later".
+            if processed_users < amount_of_users:
+                pause = get_value(
+                    getattr(self.args, "daily_story_pause", None), None, 5
+                )
+                # get_value may return int; use as mid of a small range.
+                lo = max(1.0, float(pause) * 0.7)
+                hi = max(lo + 0.5, float(pause) * 1.3)
+                logger.info(
+                    f"Daily story pause {lo:.0f}-{hi:.0f}s before next account "
+                    f"({processed_users}/{amount_of_users}).",
+                    extra={"color": f"{Fore.GREEN}"},
+                )
+                random_sleep(lo, hi, modulable=False, log=False, minimum=1.0)
+
+            # Stop early if session watch limit is hit (shared with list stories).
+            if self.session_state.check_limit(
+                limit_type=self.session_state.Limit.WATCHES, output=False
+            ):
+                logger.info(
+                    "Watch limit reached during daily story likes — ending batch.",
+                    extra={"color": f"{Fore.CYAN}"},
+                )
+                break
+
         # Log completion
-        if next_position == 0 or current_position == 0:
-            completion_msg = f"Reached end of list and wrapped to beginning."
+        if current_position == 0:
+            completion_msg = "Reached end of list and wrapped to beginning."
             logger.info(completion_msg)
             append_story_likes_log(storage.my_username, completion_msg)
-        
+
         logger.info(
             f"Processed {processed_users} account(s) for stories this session. "
             f"Next session will resume from position {current_position}/{len_usernames}."
@@ -794,6 +869,12 @@ def handle_daily_story_likes_from_file(self, device, parameter_passed, storage):
         f"Job complete — processed {processed_users}/{amount_of_users} this run.",
     )
     self.session_state.daily_story_likes_limit = None
+    if getattr(self.args, "end_session_after_daily_story_likes", False):
+        self.session_state.end_session_after_job = True
+        logger.info(
+            "Will end session after this daily story batch (no more jobs).",
+            extra={"color": f"{Fore.CYAN}"},
+        )
     self.session_state._publish_live_progress()
 
 
@@ -888,6 +969,7 @@ def handle_likers(
         prev_screen_iterated_likers = []
         story_only = list_story_likes_only(self.args)
         story_liked_likers = set()
+        story_no_ring_likers = set()
         skip_same_likers_end_once = False
 
         while True:
@@ -911,107 +993,140 @@ def handle_likers(
                 )
                 return
             try:
-                for item in user_container:
-                    try:
-                        cur_row_height = item.get_height()
-                        if cur_row_height < row_height:
-                            continue
-                        element_opened = False
-                        username_view = OpenedPostView(device)._getUserName(item)
-                        if not username_view.exists(Timeout.MEDIUM):
-                            logger.info(
-                                "Next item not found: probably reached end of the screen.",
-                                extra={"color": f"{Fore.GREEN}"},
-                            )
-                            break
+                if story_only:
+                    def _liker_username(row_item):
+                        name_view = OpenedPostView(device)._getUserName(row_item)
+                        if not name_view.exists(Timeout.ZERO):
+                            return None
+                        return name_view.get_text()
 
-                        username = username_view.get_text()
+                    ordered_rows = visible_list_rows_top_to_bottom(
+                        user_container,
+                        username_from_row=_liker_username,
+                        row_height=row_height,
+                    )
+                    for username, _item in ordered_rows:
                         screen_iterated_likers.append(username)
                         posts_end_detector.notify_username_iterated(username)
-                        can_interact = False
-                        if storage.is_user_in_blacklist(username):
-                            logger.info(f"@{username} is in blacklist. Skip.")
-                        elif story_only:
+                    if ordered_rows:
+                        preview = ", ".join(f"@{u}" for u, _ in ordered_rows[:8])
+                        if len(ordered_rows) > 8:
+                            preview += f", …(+{len(ordered_rows) - 8})"
+                        logger.info(
+                            f"Likers top→bottom ({len(ordered_rows)}): {preview}",
+                            extra={"color": f"{Fore.GREEN}"},
+                        )
+                    for username, item in ordered_rows:
+                        try:
+                            if storage.is_user_in_blacklist(username):
+                                logger.info(f"@{username} is in blacklist. Skip.")
+                                continue
                             if username in story_liked_likers:
+                                continue
+                            if username in story_no_ring_likers:
+                                continue
+                            ring = find_list_row_story_ring(item, username)
+                            if ring is None:
                                 logger.info(
-                                    f"@{username}: story already liked this sheet — skip.",
+                                    f"@{username}: no story ring — skip.",
                                     extra={"color": f"{Fore.GREEN}"},
                                 )
-                            else:
-                                can_interact = True
-                        else:
-                            (
-                                interacted,
-                                interacted_when,
-                            ) = storage.check_user_was_interacted(username)
-                            if interacted:
-                                can_reinteract = storage.can_be_reinteract(
-                                    interacted_when,
-                                    get_value(self.args.can_reinteract_after, None, 0),
-                                )
+                                story_no_ring_likers.add(username)
+                                continue
+                            story_result = interact_list_story_ring(
+                                self,
+                                device,
+                                item,
+                                username,
+                                storage,
+                                session_state,
+                                current_job,
+                                target,
+                                on_interaction,
+                            )
+                            if story_result is False:
+                                return
+                            if story_result is True:
+                                story_liked_likers.add(username)
+                                story_liked_this_screen = True
+                                opened = True
                                 logger.info(
-                                    f"@{username}: already interacted on {interacted_when:%Y/%m/%d %I:%M:%S %p}. {'Interacting again now' if can_reinteract else 'Skip'}."
+                                    f"Story likes on likers sheet: "
+                                    f"{len(story_liked_likers)} — "
+                                    "rescan sheet top→bottom for more rings "
+                                    "(no scroll yet).",
+                                    extra={"color": f"{Fore.GREEN}"},
                                 )
-                                if can_reinteract:
-                                    can_interact = True
-                            else:
-                                can_interact = True
+                                skip_same_likers_end_once = True
+                                break
+                            story_no_ring_likers.add(username)
+                        except DeviceFacade.JsonRpcError:
+                            logger.debug("Liker row disappeared — rescan list.")
+                            break
+                else:
+                    for item in user_container:
+                        try:
+                            cur_row_height = item.get_height()
+                            if cur_row_height < row_height:
+                                continue
+                            username_view = OpenedPostView(device)._getUserName(item)
+                            if not username_view.exists(Timeout.MEDIUM):
+                                logger.info(
+                                    "Next item not found: probably reached end of the screen.",
+                                    extra={"color": f"{Fore.GREEN}"},
+                                )
+                                break
 
-                        if can_interact:
-                            if not story_only:
+                            username = username_view.get_text()
+                            screen_iterated_likers.append(username)
+                            posts_end_detector.notify_username_iterated(username)
+                            can_interact = False
+                            if storage.is_user_in_blacklist(username):
+                                logger.info(f"@{username} is in blacklist. Skip.")
+                            else:
+                                (
+                                    interacted,
+                                    interacted_when,
+                                ) = storage.check_user_was_interacted(username)
+                                if interacted:
+                                    can_reinteract = storage.can_be_reinteract(
+                                        interacted_when,
+                                        get_value(self.args.can_reinteract_after, None, 0),
+                                    )
+                                    logger.info(
+                                        f"@{username}: already interacted on {interacted_when:%Y/%m/%d %I:%M:%S %p}. {'Interacting again now' if can_reinteract else 'Skip'}."
+                                    )
+                                    if can_reinteract:
+                                        can_interact = True
+                                else:
+                                    can_interact = True
+
+                            if can_interact:
                                 logger.info(
                                     f"@{username}: interact",
                                     extra={"color": f"{Fore.YELLOW}"},
                                 )
-                            if story_only:
-                                story_result = interact_list_story_ring(
-                                    self,
-                                    device,
-                                    item,
-                                    username,
-                                    storage,
-                                    session_state,
-                                    current_job,
-                                    target,
-                                    on_interaction,
-                                )
-                                if story_result is False:
-                                    return
-                                if story_result is True:
-                                    story_liked_likers.add(username)
-                                    story_liked_this_screen = True
-                                    opened = True
-                                    logger.info(
-                                        f"Story likes on likers sheet: "
-                                        f"{len(story_liked_likers)} — "
-                                        "rescan sheet for more rings "
-                                        "(no scroll yet).",
-                                        extra={"color": f"{Fore.GREEN}"},
-                                    )
-                                    skip_same_likers_end_once = True
-                                    break
-                                continue
-                            element_opened = username_view.click_retry()
+                                element_opened = username_view.click_retry()
 
-                            if element_opened and not interact(
-                                storage=storage,
-                                is_follow_limit_reached=is_follow_limit_reached,
-                                username=username,
-                                interaction=interaction,
-                                device=device,
-                                session_state=session_state,
-                                current_job=current_job,
-                                target=target,
-                                on_interaction=on_interaction,
-                            ):
-                                return
-                            if element_opened:
-                                opened = True
-                                logger.info("Back to likers list.")
-                                device.back()
-                    except DeviceFacade.JsonRpcError:
-                        logger.debug("Liker row disappeared — rescan list.")
-                        break
+                                if element_opened and not interact(
+                                    storage=storage,
+                                    is_follow_limit_reached=is_follow_limit_reached,
+                                    username=username,
+                                    interaction=interaction,
+                                    device=device,
+                                    session_state=session_state,
+                                    current_job=current_job,
+                                    target=target,
+                                    on_interaction=on_interaction,
+                                ):
+                                    return
+                                if element_opened:
+                                    opened = True
+                                    logger.info("Back to likers list.")
+                                    device.back()
+                        except DeviceFacade.JsonRpcError:
+                            logger.debug("Liker row disappeared — rescan list.")
+                            break
 
             except IndexError:
                 logger.info(
@@ -1374,12 +1489,23 @@ def iterate_over_followers(
 
     story_only = list_story_likes_only(self.args)
     story_liked_usernames = set()
+    story_no_ring_usernames = set()
     story_scrolls_without_new_ring = 0
     # After a ring like we force a scroll; don't treat the next identical
     # partial screen as "end of list".
     skip_same_users_end_once = False
 
     while True:
+        if story_only and session_state.check_limit(
+            limit_type=session_state.Limit.WATCHES, output=False
+        ):
+            logger.info(
+                f"@{target_label}: watch limit reached — done with story likes "
+                f"({len(story_liked_usernames)} liked this list).",
+                extra={"color": f"{Fore.GREEN}"},
+            )
+            return
+
         if followers_list_shows_no_results(device):
             logger.warning(
                 f"@{target_label}: followers list shows 'No results' "
@@ -1460,125 +1586,158 @@ def iterate_over_followers(
             return
         suggested_top = suggested_for_you_top(device) if not is_myself else None
         try:
-            for item in user_list:
-                try:
-                    if item_at_or_below_y(item, suggested_top):
-                        logger.info(
-                            "Hit 'Suggested for you' section — skip suggestion rows.",
-                            extra={"color": f"{Fore.GREEN}"},
-                        )
-                        break
-                    cur_row_height = item.get_height()
-                    if cur_row_height < row_height:
-                        continue
-                    if story_only:
-                        user_name_view = item.child(
-                            resourceId=self.ResourceID.FOLLOW_LIST_USERNAME
-                        )
-                    else:
-                        user_info_view = item.child(index=1)
-                        user_name_view = user_info_view.child(index=0).child()
-                    if not user_name_view.exists(Timeout.ZERO):
-                        if story_only:
-                            # Partial/suggestion row — keep scanning other rows.
-                            continue
-                        logger.info(
-                            "Next item not found: probably reached end of the screen.",
-                            extra={"color": f"{Fore.GREEN}"},
-                        )
-                        break
+            if story_only:
+                # Walk usernames top→bottom on this screen; only scroll when
+                # no remaining story rings are visible.
+                def _followers_username(row_item):
+                    name_view = row_item.child(
+                        resourceId=self.ResourceID.FOLLOW_LIST_USERNAME
+                    )
+                    if not name_view.exists(Timeout.ZERO):
+                        return None
+                    return name_view.get_text()
 
-                    username = user_name_view.get_text()
+                ordered_rows = visible_list_rows_top_to_bottom(
+                    user_list,
+                    username_from_row=_followers_username,
+                    row_height=row_height,
+                    suggested_top=suggested_top,
+                )
+                for username, _item in ordered_rows:
                     screen_iterated_followers.append(username)
                     scroll_end_detector.notify_username_iterated(username)
+                if ordered_rows:
+                    preview = ", ".join(f"@{u}" for u, _ in ordered_rows[:8])
+                    if len(ordered_rows) > 8:
+                        preview += f", …(+{len(ordered_rows) - 8})"
+                    logger.info(
+                        f"Screen top→bottom ({len(ordered_rows)}): {preview}",
+                        extra={"color": f"{Fore.GREEN}"},
+                    )
 
-                    can_interact = False
-                    if storage.is_user_in_blacklist(username):
-                        logger.info(f"@{username} is in blacklist. Skip.")
-                    elif story_only:
+                for username, item in ordered_rows:
+                    try:
+                        if storage.is_user_in_blacklist(username):
+                            logger.info(f"@{username} is in blacklist. Skip.")
+                            continue
                         if username in story_liked_usernames:
+                            continue
+                        if username in story_no_ring_usernames:
+                            continue
+                        ring = find_list_row_story_ring(item, username)
+                        if ring is None:
                             logger.info(
-                                f"@{username}: story already liked this list — skip.",
+                                f"@{username}: no story ring — skip.",
                                 extra={"color": f"{Fore.GREEN}"},
                             )
-                        else:
-                            can_interact = True
-                    else:
-                        interacted, interacted_when = storage.check_user_was_interacted(
-                            username
+                            story_no_ring_usernames.add(username)
+                            continue
+                        story_result = interact_list_story_ring(
+                            self,
+                            device,
+                            item,
+                            username,
+                            storage,
+                            session_state,
+                            current_job,
+                            target,
+                            on_interaction,
                         )
-                        if interacted:
-                            can_reinteract = storage.can_be_reinteract(
-                                interacted_when,
-                                get_value(self.args.can_reinteract_after, None, 0),
-                            )
+                        if story_result is False:
+                            return
+                        if story_result is True:
+                            story_liked_usernames.add(username)
+                            story_liked_this_screen = True
+                            story_scrolls_without_new_ring = 0
                             logger.info(
-                                f"@{username}: already interacted on {interacted_when:%Y/%m/%d %I:%M:%S %p}. {'Interacting again now' if can_reinteract else 'Skip'}."
+                                f"Story likes on @{target_label}: "
+                                f"{len(story_liked_usernames)} this list — "
+                                "rescan screen top→bottom for more rings "
+                                "(no scroll yet).",
+                                extra={"color": f"{Fore.GREEN}"},
                             )
-                            if can_reinteract:
-                                can_interact = True
-                            else:
-                                screen_skipped_followers_count += 1
-                        else:
-                            can_interact = True
+                            # Stale row handles after story open/close —
+                            # rescan THIS screen; scroll only when no rings left.
+                            break
+                        # Opened but could not like — don't retry forever.
+                        story_no_ring_usernames.add(username)
+                    except DeviceFacade.JsonRpcError:
+                        logger.debug("Follower row disappeared — rescan list.")
+                        break
+            else:
+                for item in user_list:
+                    try:
+                        if item_at_or_below_y(item, suggested_top):
+                            logger.info(
+                                "Hit 'Suggested for you' section — skip suggestion rows.",
+                                extra={"color": f"{Fore.GREEN}"},
+                            )
+                            break
+                        cur_row_height = item.get_height()
+                        if cur_row_height < row_height:
+                            continue
+                        user_info_view = item.child(index=1)
+                        user_name_view = user_info_view.child(index=0).child()
+                        if not user_name_view.exists(Timeout.ZERO):
+                            logger.info(
+                                "Next item not found: probably reached end of the screen.",
+                                extra={"color": f"{Fore.GREEN}"},
+                            )
+                            break
 
-                    if can_interact:
-                        if not story_only:
+                        username = user_name_view.get_text()
+                        screen_iterated_followers.append(username)
+                        scroll_end_detector.notify_username_iterated(username)
+
+                        can_interact = False
+                        if storage.is_user_in_blacklist(username):
+                            logger.info(f"@{username} is in blacklist. Skip.")
+                        else:
+                            interacted, interacted_when = storage.check_user_was_interacted(
+                                username
+                            )
+                            if interacted:
+                                can_reinteract = storage.can_be_reinteract(
+                                    interacted_when,
+                                    get_value(self.args.can_reinteract_after, None, 0),
+                                )
+                                logger.info(
+                                    f"@{username}: already interacted on {interacted_when:%Y/%m/%d %I:%M:%S %p}. {'Interacting again now' if can_reinteract else 'Skip'}."
+                                )
+                                if can_reinteract:
+                                    can_interact = True
+                                else:
+                                    screen_skipped_followers_count += 1
+                            else:
+                                can_interact = True
+
+                        if can_interact:
                             logger.info(
                                 f"@{username}: interact",
                                 extra={"color": f"{Fore.YELLOW}"},
                             )
-                        if story_only:
-                            story_result = interact_list_story_ring(
-                                self,
-                                device,
-                                item,
-                                username,
-                                storage,
-                                session_state,
-                                current_job,
-                                target,
-                                on_interaction,
-                            )
-                            if story_result is False:
-                                return
-                            if story_result is True:
-                                story_liked_usernames.add(username)
-                                story_liked_this_screen = True
-                                story_scrolls_without_new_ring = 0
-                                logger.info(
-                                    f"Story likes on @{target_label}: "
-                                    f"{len(story_liked_usernames)} this list — "
-                                    "rescan screen for more rings "
-                                    "(no scroll yet).",
-                                    extra={"color": f"{Fore.GREEN}"},
-                                )
-                                # Stale row handles after story open/close —
-                                # rescan THIS screen; scroll only when no rings left.
-                                break
-                            continue
-                        element_opened = user_name_view.click_retry()
+                            element_opened = user_name_view.click_retry()
 
-                        if element_opened:
-                            if not interact(
-                                storage=storage,
-                                is_follow_limit_reached=is_follow_limit_reached,
-                                username=username,
-                                interaction=interaction,
-                                device=device,
-                                session_state=session_state,
-                                current_job=current_job,
-                                target=target,
-                                on_interaction=on_interaction,
-                            ):
-                                return
-                        if element_opened:
-                            logger.info("Back to followers list")
-                            device.back()
-                except DeviceFacade.JsonRpcError:
-                    # Row vanished mid-iteration (common after story ring taps).
-                    logger.debug("Follower row disappeared — rescan list.")
-                    break
+                            if element_opened:
+                                if not interact(
+                                    storage=storage,
+                                    is_follow_limit_reached=is_follow_limit_reached,
+                                    username=username,
+                                    interaction=interaction,
+                                    device=device,
+                                    session_state=session_state,
+                                    current_job=current_job,
+                                    target=target,
+                                    on_interaction=on_interaction,
+                                ):
+                                    return
+                            if element_opened:
+                                logger.info("Back to followers list")
+                                device.back()
+                    except DeviceFacade.JsonRpcError:
+                        # Row vanished mid-iteration (common after story ring taps).
+                        logger.debug("Follower row disappeared — rescan list.")
+                        break
 
         except IndexError:
             logger.info(
@@ -1632,7 +1791,7 @@ def iterate_over_followers(
                     return
                 story_scrolls_without_new_ring += 1
                 logger.info(
-                    f"No more rings on this screen — scroll "
+                    f"No story rings on screen — scroll "
                     f"({story_scrolls_without_new_ring}/25) "
                     f"(liked {len(story_liked_usernames)} on @{target_label}).",
                     extra={"color": f"{Fore.GREEN}"},

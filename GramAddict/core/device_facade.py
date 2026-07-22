@@ -112,7 +112,16 @@ class DeviceFacade:
 
     def check_if_ig_is_opened(func):
         def wrapper(self, **kwargs):
-            avoid_lst = ["choose_cloned_app", "check_if_crash_popup_is_there"]
+            # Callers that must work when IG is closed / not focused (crash recovery,
+            # rate-limit dialogs, system popups).
+            avoid_lst = {
+                "choose_cloned_app",
+                "check_if_crash_popup_is_there",
+                "is_instagram_try_again_later_visible",
+                "dismiss_instagram_try_again_later",
+                "check_instagram_rate_limit",
+                "restart",
+            }
             caller = stack()[1].function
             if not self._ig_is_opened() and caller not in avoid_lst:
                 raise DeviceFacade.AppHasCrashed("App has crashed / has been closed!")

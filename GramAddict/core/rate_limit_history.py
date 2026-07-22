@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional, Tuple
 
@@ -205,6 +205,23 @@ def record_rate_limit_event(
         )
     except OSError as exc:
         logger.warning("Could not write rate limit history for @%s: %s", safe, exc)
+
+
+def active_rate_limit_resume_at(username: str) -> Optional[str]:
+    """ISO resume time if the latest recorded action-limit break is still active."""
+    safe = (username or "").strip().lstrip("@")
+    events = _load_events(safe)
+    if not events:
+        return None
+    last = events[0]
+    at = _parse_event_time(last.get("at"))
+    break_minutes = int(last.get("break_minutes") or 0)
+    if at is None or break_minutes <= 0:
+        return None
+    resume = at + timedelta(minutes=break_minutes)
+    if resume <= datetime.now():
+        return None
+    return resume.isoformat(timespec="seconds")
 
 
 def load_rate_limit_history(username: str, *, max_events: int = 20) -> dict[str, Any]:

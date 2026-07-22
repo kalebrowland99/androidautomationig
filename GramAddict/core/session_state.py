@@ -56,6 +56,7 @@ class SessionState:
     totalPm = 0
     totalWatched = 0
     totalStoryLikes = 0
+    totalStoryAccountsLiked = 0
     totalDailyStoryAccounts = 0
     daily_story_likes_limit = None
     totalUnfollowed = 0
@@ -80,6 +81,7 @@ class SessionState:
         self.totalPm = 0
         self.totalWatched = 0
         self.totalStoryLikes = 0
+        self.totalStoryAccountsLiked = 0
         self.totalDailyStoryAccounts = 0
         self.daily_story_likes_limit = None
         self.totalUnfollowed = 0
@@ -88,6 +90,8 @@ class SessionState:
         self.totalCrashes = 0
         self.startTime = datetime.now()
         self.finishTime = None
+        # Set by daily-story-likes when --end-session-after-daily-story-likes is on.
+        self.end_session_after_job = False
 
     def add_interaction(self, source, succeed, followed, scraped):
         if self.totalInteractions.get(source) is None:
@@ -121,6 +125,11 @@ class SessionState:
     def register_story_like(self) -> None:
         """Count a story segment liked during normal profile interactions."""
         self.totalStoryLikes += 1
+        self._publish_live_progress()
+
+    def register_story_account_liked(self) -> None:
+        """Count one profile where we liked at least one story segment."""
+        self.totalStoryAccountsLiked += 1
         self._publish_live_progress()
 
     def register_daily_story_account(self) -> None:
@@ -374,10 +383,12 @@ class SessionStateEncoder(JSONEncoder):
             "total_pm": session_state.totalPm,
             "total_watched": session_state.totalWatched,
             "total_story_likes": session_state.totalStoryLikes,
+            "total_story_accounts_liked": session_state.totalStoryAccountsLiked,
             "total_daily_story_accounts": session_state.totalDailyStoryAccounts,
             "daily_story_likes_limit": session_state.daily_story_likes_limit,
             "total_unfollowed": session_state.totalUnfollowed,
             "total_scraped": session_state.totalScraped,
+            "total_crashes": session_state.totalCrashes,
             "start_time": str(session_state.startTime),
             "finish_time": str(session_state.finishTime),
             "args": session_state.args.__dict__,

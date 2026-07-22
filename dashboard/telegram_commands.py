@@ -180,14 +180,21 @@ def _format_account_status(account: TelegramAccount) -> str:
             likes = live.get("total_likes", 0)
             follows = live.get("total_followed", 0)
             watches = live.get("total_watched", 0)
+            story_likes = live.get("total_story_likes", 0)
             comments = live.get("total_comments", 0)
             limits = live.get("limits") or {}
             likes_lim = limits.get("likes")
+            watches_lim = limits.get("watches")
             stats = [f"Likes {likes}" + (f"/{likes_lim}" if likes_lim else "")]
             if follows:
                 stats.append(f"Follows {follows}")
             if watches:
                 stats.append(f"Stories {watches}")
+            if story_likes or watches:
+                stats.append(
+                    f"Story likes {story_likes}"
+                    + (f"/{watches_lim}" if watches_lim else "")
+                )
             if comments:
                 stats.append(f"Comments {comments}")
             lines.append(f"• Job: `{job}`")
@@ -212,11 +219,13 @@ def _format_account_status(account: TelegramAccount) -> str:
                         when = parsed.strftime("%I:%M %p")
                     except ValueError:
                         when = finish[:16]
+            story_likes = last.get("total_story_likes", 0)
             lines.append(
                 f"• Last session{f' ({when})' if when else ''}: "
                 f"{last.get('total_likes', 0)} likes, "
                 f"{last.get('total_followed', 0)} follows, "
-                f"{last.get('total_watched', 0)} stories"
+                f"{last.get('total_watched', 0)} stories, "
+                f"{story_likes} story likes"
                 + (f", {duration}m" if duration else "")
             )
         else:

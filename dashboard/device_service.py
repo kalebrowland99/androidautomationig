@@ -415,6 +415,69 @@ def press_home(serial: str) -> None:
         connect(serial).press("home")
 
 
+def send_text(serial: str, text: str, *, press_enter: bool = False) -> dict[str, Any]:
+    """Type text into the focused field on the phone (bypasses broken on-screen keyboard).
+
+    Uses ADB broadcast to FastInputIME so this works even while a bot holds the
+    uiautomator device lock (HelpWire / Mac keyboard → dashboard → phone).
+    """
+    import base64
+    import subprocess
+
+    text = text if text is not None else ""
+    if text == "" and not press_enter:
+        raise ValueError("Nothing to send")
+
+    def _adb_shell(*args: str, timeout: float = 12) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["adb", "-s", serial, "shell", *args],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+
+    # Make sure FastInputIME can receive broadcasts (doesn't require u2 lock).
+    _adb_shell("ime", "enable", "com.github.uiautomator/.FastInputIME", timeout=8)
+    _adb_shell("ime", "set", "com.github.uiautomator/.FastInputIME", timeout=8)
+
+    if text:
+        # Base64 avoids shell escaping issues with spaces/quotes/emoji.
+        b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        proc = _adb_shell(
+            "am",
+            "broadcast",
+            "-a",
+            "ADB_INPUT_B64",
+            "--es",
+            "msg",
+            b64,
+            timeout=15,
+        )
+        ok = proc.returncode == 0 and "Broadcast completed" in (proc.stdout or "")
+        if not ok:
+            # Fallback: plain ADB_INPUT_TEXT (ASCII-ish).
+            safe = text.replace(" ", "%s")
+            proc2 = _adb_shell(
+                "am",
+                "broadcast",
+                "-a",
+                "ADB_INPUT_TEXT",
+                "--es",
+                "msg",
+                safe,
+                timeout=15,
+            )
+            if proc2.returncode != 0:
+                err = (proc.stderr or proc2.stderr or proc.stdout or "adb failed").strip()
+                raise RuntimeError(err[:300])
+
+    if press_enter:
+        _adb_shell("input", "keyevent", "66", timeout=8)  # KEYCODE_ENTER
+
+    return {"ok": True, "chars": len(text), "enter": bool(press_enter)}
+
+
 def dump_to_disk(serial: str) -> dict[str, Any]:
     from dump_tree import summarize_hierarchy, write_app_info  # noqa: E402
 

@@ -145,21 +145,44 @@ skipped = data.get("skipped") or []
 serials = data.get("serials") or []
 names = [f"@{s.get('username') or s.get('account_id')}" for s in started]
 fail_names = [f"@{s.get('username') or s.get('account_id')}" for s in failed]
+already = [
+    f"@{s.get('username') or s.get('account_id')}"
+    for s in skipped
+    if "already running" in str(s.get("reason") or "").lower()
+]
+other_skip = [
+    f"@{s.get('username') or s.get('account_id')}"
+    for s in skipped
+    if "already running" not in str(s.get("reason") or "").lower()
+]
 print(f"STARTED_COUNT={len(started)}")
 print(f"FAILED_COUNT={len(failed)}")
 print(f"SKIPPED_COUNT={len(skipped)}")
+print(f"ALREADY_COUNT={len(already)}")
+print(f"OTHER_SKIP_COUNT={len(other_skip)}")
 print(f"SERIAL_COUNT={len(serials)}")
 print("STARTED_NAMES=" + shlex.quote(" ".join(names)))
 print("FAILED_NAMES=" + shlex.quote(" ".join(fail_names)))
+print("ALREADY_NAMES=" + shlex.quote(" ".join(already)))
+print("OTHER_SKIP_NAMES=" + shlex.quote(" ".join(other_skip)))
 PY
 )"
 
 if [[ "${SERIAL_COUNT:-0}" -eq 0 ]]; then
   msg="⚠️ Morning — no Farm phones selected"
 elif [[ "${STARTED_COUNT:-0}" -gt 0 && "${FAILED_COUNT:-0}" -eq 0 ]]; then
-  msg="✅ Morning — ${STARTED_NAMES}"
+  if [[ "${ALREADY_COUNT:-0}" -gt 0 ]]; then
+    msg="✅ Morning — ${STARTED_NAMES} · already running ${ALREADY_NAMES}"
+  else
+    msg="✅ Morning — ${STARTED_NAMES}"
+  fi
 elif [[ "${STARTED_COUNT:-0}" -gt 0 ]]; then
   msg="⚠️ Morning — ${STARTED_NAMES} · failed ${FAILED_NAMES}"
+elif [[ "${ALREADY_COUNT:-0}" -gt 0 && "${FAILED_COUNT:-0}" -eq 0 ]]; then
+  # Both (or all) were already running — not a failure.
+  msg="✅ Morning — already running: ${ALREADY_NAMES}"
+elif [[ "${FAILED_COUNT:-0}" -gt 0 ]]; then
+  msg="❌ Morning — failed ${FAILED_NAMES}"
 else
   msg="❌ Morning — nothing started"
 fi

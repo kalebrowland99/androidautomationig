@@ -571,20 +571,6 @@ function findDeviceRow(serial) {
   );
 }
 
-function sleepingTagHtml(nextAt) {
-  let title = "Sleeping between sessions";
-  if (nextAt) {
-    const d = new Date(nextAt);
-    if (!isNaN(d.getTime())) {
-      title = `Sleeping between sessions · next session ${d.toLocaleTimeString(
-        undefined,
-        { hour: "numeric", minute: "2-digit" }
-      )}`;
-    }
-  }
-  return ` <span class="phones-account-sleeping" title="${escapeHtml(title)}" aria-label="${escapeHtml(title)}">💤</span>`;
-}
-
 function formatBackOnline(nextAt) {
   if (!nextAt) return "";
   const d = new Date(nextAt);
@@ -606,57 +592,110 @@ function formatBackOnline(nextAt) {
   return `${day}, ${time}`;
 }
 
-function actionLimitHtml(acct) {
+function botStateFromProgress(acct, acctRunning) {
   const p = acct?.progress;
-  if (!p?.rate_limited) return "";
+  if (p?.state) return p.state;
+  if (p?.rate_limited) return "action_limit";
+  if (acctRunning && p?.sleeping) return "waiting";
+  if (acctRunning) return "running";
+  return "stopped";
+}
+
+/** Clear Farm status line: Running · Waiting · Action limit · Stopped */
+function botStatusRowHtml(acct, acctRunning) {
+  const p = acct?.progress || {};
+  const state = botStateFromProgress(acct, acctRunning);
   const when = formatBackOnline(p.next_session_at);
-  const title = when
-    ? `Instagram action limit — back online ${when}`
-    : "Instagram action limit";
-  return `<div class="phones-account-action-limit" title="${escapeHtml(title)}">
-    <span class="phones-account-action-limit-tag">Action limit</span>
-    ${
-      when
-        ? `<span class="phones-account-action-limit-when">Back ${escapeHtml(when)}</span>`
-        : ""
-    }
+  const job = (p.current_job || "").replace(/-/g, " ");
+
+  if (state === "action_limit") {
+    const title = when
+      ? `Instagram action limit — starts again ${when}`
+      : "Instagram action limit";
+    return `<div class="phones-account-status" title="${escapeHtml(title)}">
+      <span class="phones-status-tag action-limit">Action limit</span>
+      ${when ? `<span class="phones-status-when">starts again ${escapeHtml(when)}</span>` : ""}
+    </div>`;
+  }
+  if (state === "waiting") {
+    const title = when
+      ? `Waiting between sessions — starts again ${when}`
+      : "Waiting between sessions";
+    return `<div class="phones-account-status" title="${escapeHtml(title)}">
+      <span class="phones-status-tag waiting">Waiting</span>
+      ${when ? `<span class="phones-status-when">starts again ${escapeHtml(when)}</span>` : ""}
+    </div>`;
+  }
+  if (state === "running") {
+    const title = job ? `Running — ${job}` : "Bot running";
+    return `<div class="phones-account-status" title="${escapeHtml(title)}">
+      <span class="phones-status-tag running">Running</span>
+      ${job ? `<span class="phones-status-when">${escapeHtml(job)}</span>` : ""}
+    </div>`;
+  }
+  return `<div class="phones-account-status" title="Bot process is not running">
+    <span class="phones-status-tag stopped">Stopped</span>
   </div>`;
 }
 
 function progressLimitsHtml(acct, acctRunning) {
-  // Show counters while running, or while paused on an action limit (even if
-  // the process died mid-sleep — resume time still comes from live_progress).
   const p = acct?.progress;
   if (!p) return "";
-  if (!acctRunning && !p.rate_limited) return "";
+  const state = botStateFromProgress(acct, acctRunning);
   const part = (label, val, lim) => {
-    if (val == null && !lim) return null;
+    if ((val == null || val === 0) && !lim) return null;
     return `${label} ${val ?? 0}${lim ? `/${lim}` : ""}`;
   };
-  const parts = [
-    part("Follows", p.follows, p.follows_limit),
-    part("Likes", p.likes, p.likes_limit),
-    part("Comments", p.comments, p.comments_limit),
-  ];
-  if (p.story_likes > 0) {
-    parts.push(part("Story likes", p.story_likes, p.story_likes_limit ?? p.watches_limit));
-  } else if (p.watched > 0) {
-    parts.push(part("Stories", p.watched, p.watches_limit));
+  // Always show — even at 0 — so Farm makes accounts-liked visible.
+  const countPart = (label, val) => `${label} ${val ?? 0}`;
+
+  // Session line (while active / waiting / action-limit).
+  let sessionLine = "";
+  if (state !== "stopped") {
+    const parts = [
+      part("Liked Posts", p.likes, p.likes_limit),
+      part(
+        "Liked Stories",
+        p.story_likes || p.watched,
+        p.story_likes_limit ?? p.watches_limit
+      ),
+      countPart("Story Accounts", p.story_accounts_liked),
+      part("Followed", p.follows, p.follows_limit),
+    ];
+    if (
+      (p.daily_story_likes != null && p.daily_story_likes > 0) ||
+      p.current_job === "daily-story-likes"
+    ) {
+      parts.push(
+        part("Daily list", p.daily_story_likes ?? 0, p.daily_story_likes_limit)
+      );
+    }
+    const text = parts.filter(Boolean).join(" · ");
+    if (text) {
+      sessionLine = `<div class="phones-account-progress" title="This session">${escapeHtml(
+        "Session · " + text
+      )}</div>`;
+    }
   }
-  if (
-    (p.daily_story_likes != null && p.daily_story_likes > 0) ||
-    p.current_job === "daily-story-likes"
-  ) {
-    parts.push(
-      part("Daily story likes", p.daily_story_likes ?? 0, p.daily_story_likes_limit)
-    );
+
+  // Today line — display-only daily goals (never stop the bot).
+  const t = p.today;
+  let todayLine = "";
+  if (t && typeof t === "object") {
+    const todayParts = [
+      part("Liked Posts", t.likes, t.likes_goal),
+      part("Liked Stories", t.story_likes, t.story_likes_goal),
+      countPart("Story Accounts", t.story_accounts_liked),
+      part("Followed", t.follows, t.follows_goal),
+    ].filter(Boolean);
+    if (todayParts.length) {
+      todayLine = `<div class="phones-account-progress phones-account-today" title="Today (goal is display-only)">${escapeHtml(
+        "Today · " + todayParts.join(" · ")
+      )}</div>`;
+    }
   }
-  const text = parts.filter(Boolean).join(" · ");
-  // Between-session sleep only (action-limit has its own tag under the @).
-  const sleeping =
-    p.sleeping && !p.rate_limited ? sleepingTagHtml(p.next_session_at) : "";
-  if (!text && !sleeping) return "";
-  return `<div class="phones-account-progress" title="Live session progress">${escapeHtml(text)}${sleeping}</div>`;
+  if (!sessionLine && !todayLine) return "";
+  return `${sessionLine}${todayLine}`;
 }
 
 function deviceAccountCellHtml(serial, acct, acctRunning) {
@@ -671,7 +710,7 @@ function deviceAccountCellHtml(serial, acct, acctRunning) {
       )}">Disabled</span>`
     : "";
   const marks = `${runningMark}${errorMark}${disabledMark}`;
-  const actionLimit = actionLimitHtml(acct);
+  const statusRow = botStatusRowHtml(acct, acctRunning);
   const progress = progressLimitsHtml(acct, acctRunning);
   if (deviceAccountEditingSerial === serial) {
     const handleValue = escapeHtml(deviceAccountInputValue(serial, acct));
@@ -698,7 +737,7 @@ function deviceAccountCellHtml(serial, acct, acctRunning) {
         <button type="button" class="phones-account-display" title="Click to edit · double-click to open @${escapeHtml(handle)} on Instagram">@${escapeHtml(handle)}</button>
         ${marks}
       </div>
-      ${actionLimit}
+      ${statusRow}
       ${progress}
       ${deviceAccountNoteHtml(acct)}
     </div>`;
@@ -1285,12 +1324,35 @@ function hasRecentError(lastError) {
   return !!(lastError && lastError.recent);
 }
 
-// Build the up-to-2 status tags: an Active/Inactive pill, plus a "Recent error"
-// pill with an ⓘ button when the account logged an error recently.
-function statusTagsHtml(running, lastError, disabled, disabledReason) {
-  const stateTag = running
-    ? '<span class="status-tag active">Active</span>'
-    : '<span class="status-tag inactive">Inactive</span>';
+// Context-strip status: Running / Waiting / Action limit / Stopped (+ error/disabled).
+function statusTagsHtml(running, lastError, disabled, disabledReason, progress) {
+  const state =
+    progress?.state ||
+    (progress?.rate_limited
+      ? "action_limit"
+      : running && progress?.sleeping
+        ? "waiting"
+        : running
+          ? "running"
+          : "stopped");
+  const when = formatBackOnline(progress?.next_session_at);
+  let stateTag;
+  if (state === "action_limit") {
+    stateTag = `<span class="status-tag action-limit" title="${escapeHtml(
+      when ? `Action limit — starts again ${when}` : "Action limit"
+    )}">Action limit${when ? ` · ${escapeHtml(when)}` : ""}</span>`;
+  } else if (state === "waiting") {
+    stateTag = `<span class="status-tag waiting" title="${escapeHtml(
+      when ? `Waiting — starts again ${when}` : "Waiting between sessions"
+    )}">Waiting${when ? ` · ${escapeHtml(when)}` : ""}</span>`;
+  } else if (state === "running") {
+    const job = (progress?.current_job || "").replace(/-/g, " ");
+    stateTag = `<span class="status-tag active" title="${escapeHtml(
+      job ? `Running — ${job}` : "Running"
+    )}">Running${job ? ` · ${escapeHtml(job)}` : ""}</span>`;
+  } else {
+    stateTag = '<span class="status-tag inactive">Stopped</span>';
+  }
   const disabledTag = disabled
     ? `<span class="status-tag disabled" title="${escapeHtml(
         disabledReason ? `Disabled — ${disabledReason}` : "Disabled"
@@ -1384,7 +1446,8 @@ function updateContextStrip() {
       running,
       acct?.last_error,
       acct?.disabled,
-      acct?.disabled_reason
+      acct?.disabled_reason,
+      acct?.progress
     );
   }
 
@@ -1411,6 +1474,10 @@ function updateContextStrip() {
   });
   updateFarmBatchButtons();
   $("btn-ctx-mirror") && ($("btn-ctx-mirror").disabled = !activeSerial && selectedSerials.size === 0);
+  const typeInput = $("ctx-type-input");
+  const typeBtn = $("btn-ctx-type");
+  if (typeInput) typeInput.disabled = !activeSerial;
+  if (typeBtn) typeBtn.disabled = !activeSerial;
   const quickDebugBtn = $("btn-ctx-quick-debug");
   if (quickDebugBtn) {
     const stepId = localStorage.getItem("debugTestId") || "open-instagram";
@@ -1781,6 +1848,42 @@ async function pressHome() {
   } catch (err) {
     log(`Home failed: ${err.message}`, "error");
   }
+}
+
+async function sendPhoneText(event) {
+  if (event) event.preventDefault();
+  const serial = activeSerial || [...selectedSerials][0];
+  const input = $("ctx-type-input");
+  if (!serial) {
+    log("Select a phone first", "error");
+    return false;
+  }
+  const text = (input?.value || "").toString();
+  if (!text.trim()) {
+    log("Type something first", "error");
+    return false;
+  }
+  const btn = $("btn-ctx-type");
+  if (btn) btn.disabled = true;
+  try {
+    const res = await fetch(`/api/devices/${encodeURIComponent(serial)}/type`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, enter: false }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || "Send failed");
+    log(`Sent ${data.chars ?? text.length} chars → ${shortSerial(serial)}`);
+    if (input) {
+      input.value = "";
+      input.focus();
+    }
+  } catch (err) {
+    log(`Type-to-phone failed: ${err.message}`, "error");
+  } finally {
+    if (btn) btn.disabled = !activeSerial && selectedSerials.size === 0;
+  }
+  return false;
 }
 
 async function mirrorSelected() {

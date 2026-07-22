@@ -91,7 +91,11 @@
                 </span>
                 <span id="ctx-status" class="context-status idle">Idle</span>
             </div>
-            <div class="context-strip-actions flex flex-wrap gap-2 shrink-0 ml-auto">
+            <div class="context-strip-actions flex flex-wrap gap-2 shrink-0 ml-auto items-center">
+                <form id="ctx-type-form" class="ctx-type-form" onsubmit="return sendPhoneText(event)">
+                    <input type="text" id="ctx-type-input" class="ctx-type-input" placeholder="Type to phone…" autocomplete="off" spellcheck="false" disabled title="Focus a text field on the phone first, then type here and Send">
+                    <button type="submit" class="btn-ghost btn-sm" id="btn-ctx-type" disabled title="Send text to focused field on selected phone">Send</button>
+                </form>
                 <button type="button" class="btn-ghost btn-sm" id="btn-ctx-quick-debug" onclick="runQuickDebug()" disabled title="Run last debug step from Tools">Debug</button>
                 <button type="button" class="btn-ghost btn-sm" id="btn-ctx-mirror" onclick="mirrorSelected()" disabled>Mirror</button>
                 <button type="button" class="btn-ghost btn-sm" id="btn-ctx-disable" onclick="toggleAccountDisabled()" disabled title="Pause this account">Disable</button>

@@ -1,11 +1,11 @@
 {
-  "clipped.yourlovefilms": "good",
-  "clipper.yourlovefilms": "appealed",
-  "clips.yourlovefilms": "appealed",
+  "clipped.yourlovefilms": "banned",
+  "clipper.yourlovefilms": "banned",
+  "clips.yourlovefilms": "banned",
   "extra.yourlovefilms": "good",
-  "extras.yourlovefilms": "good",
+  "extras.yourlovefilms": "banned",
   "more.yourlovefilms": "good",
-  "reeels.yourlovefilms": "good",
-  "reel.yourlovefilms": "appealed",
-  "shorts.yourlovefilms": "appealed"
+  "reeels.yourlovefilms": "banned",
+  "reel.yourlovefilms": "banned",
+  "shorts.yourlovefilms": "banned"
 }

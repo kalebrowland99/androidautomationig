@@ -606,6 +606,10 @@ def register_story_like(session_state):
     session_state.register_story_like()
 
 
+def register_story_account_liked(session_state):
+    session_state.register_story_account_liked()
+
+
 def register_daily_story_account(session_state):
     session_state.register_daily_story_account()
 
@@ -1313,32 +1317,44 @@ def find_list_row_story_ring(row, username: str):
 def _followers_or_likers_list_visible(device: DeviceFacade) -> bool:
     """True when a followers list or post-likers sheet is on screen."""
     rid = _story_like_resource_ids()
-    if device.find(
-        resourceIdMatches=case_insensitive_re(rid.USER_LIST_CONTAINER)
-    ).exists(Timeout.ZERO):
-        return True
-    if device.find(textMatches=case_insensitive_re(r"^Likes$")).exists(Timeout.ZERO):
-        return True
+    try:
+        if device.find(
+            resourceIdMatches=case_insensitive_re(rid.USER_LIST_CONTAINER)
+        ).exists(Timeout.ZERO):
+            return True
+        if device.find(textMatches=case_insensitive_re(r"^Likes$")).exists(Timeout.ZERO):
+            return True
+    except DeviceFacade.AppHasCrashed:
+        return False
     return False
 
 
 def _story_viewer_visible(device: DeviceFacade) -> bool:
     rid = _story_like_resource_ids()
-    return device.find(
-        resourceIdMatches=case_insensitive_re(
-            f"{rid.REEL_VIEWER_MEDIA_CONTAINER}|{rid.REEL_VIEWER_TITLE}"
-        )
-    ).exists(Timeout.ZERO)
+    try:
+        return device.find(
+            resourceIdMatches=case_insensitive_re(
+                f"{rid.REEL_VIEWER_MEDIA_CONTAINER}|{rid.REEL_VIEWER_TITLE}"
+            )
+        ).exists(Timeout.ZERO)
+    except DeviceFacade.AppHasCrashed:
+        return False
 
 
 def close_story_back_to_list(device: DeviceFacade, *, max_backs: int = 6) -> bool:
     """Leave the story viewer (or a wrongly opened profile) and return to the list."""
     for _ in range(max_backs):
-        if _followers_or_likers_list_visible(device):
-            return True
-        # modulable=False — default back() sleep is slow and looks like a hang.
-        device.back(modulable=False)
-        random_sleep(0.2, 0.35, modulable=False, log=False, minimum=0.1)
+        try:
+            if _followers_or_likers_list_visible(device):
+                return True
+            # modulable=False — default back() sleep is slow and looks like a hang.
+            device.back(modulable=False)
+            random_sleep(0.2, 0.35, modulable=False, log=False, minimum=0.1)
+        except DeviceFacade.AppHasCrashed:
+            logger.warning(
+                "Instagram left foreground while closing story — will restart."
+            )
+            raise
     return _followers_or_likers_list_visible(device)
 
 
@@ -1349,7 +1365,7 @@ def like_stories_from_list_row(
     args: Namespace,
     session_state: SessionState,
 ) -> int:
-    """Tap the list-row story ring (if present) and like one story segment.
+    """Tap the list-row story ring and like up to 8 story segments.
 
     Always tries to land back on the followers/likers list so the next row
     iteration is not left on a profile or inside the story viewer.
@@ -1393,36 +1409,90 @@ def like_stories_from_list_row(
         close_story_back_to_list(device)
         return 0
 
+    # Like every segment on this profile, capped at 8 (same as profile path).
+    stories_to_like = 8
     likes_counter = 0
-    try:
+    pause = (0.1, 0.2)
+    after_like = (0.1, 0.17)
+
+    def like_one() -> bool:
+        nonlocal likes_counter
+        if session_state.check_limit(
+            limit_type=session_state.Limit.WATCHES, output=False
+        ):
+            return False
         session_state.totalWatched += 1
-        logger.info(
-            f"@{username}: story open — liking (session watches "
-            f"{session_state.totalWatched}).",
-            extra={"color": f"{Fore.GREEN}"},
-        )
         for _ in range(4):
-            random_sleep(0.15, 0.3, modulable=False, log=False, minimum=0.05)
+            random_sleep(*pause, modulable=False, log=False, minimum=0.05)
             obj = _find_story_like_button(device, fast=True)
             if obj is None:
                 continue
             try:
                 if not obj.get_selected():
                     obj.click()
-                    random_sleep(0.1, 0.2, modulable=False, log=False, minimum=0.05)
+                    random_sleep(*after_like, modulable=False, log=False, minimum=0.05)
                     logger.info(
-                        f"@{username}: story liked.",
+                        f"@{username}: story liked ({likes_counter + 1}/{stories_to_like}).",
                         extra={"color": f"{Fore.GREEN}"},
                     )
                 else:
-                    logger.info(f"@{username}: story already liked.")
+                    logger.info(
+                        f"@{username}: story already liked "
+                        f"({likes_counter + 1}/{stories_to_like})."
+                    )
                 likes_counter += 1
                 register_story_like(session_state)
-                break
+                if likes_counter == 1:
+                    register_story_account_liked(session_state)
+                return True
             except Exception as exc:
                 logger.warning("@%s: story like tap failed: %s", username, exc)
-        if likes_counter == 0:
-            logger.warning(f"@{username}: opened story but could not like it.")
+        logger.warning(f"@{username}: opened story but could not like it.")
+        return False
+
+    try:
+        logger.info(
+            f"@{username}: story open — liking up to {stories_to_like} "
+            f"(session watches {session_state.totalWatched}).",
+            extra={"color": f"{Fore.GREEN}"},
+        )
+        if not like_one():
+            pass
+        else:
+            for _ in range(stories_to_like - 1):
+                if session_state.check_limit(
+                    limit_type=session_state.Limit.WATCHES, output=False
+                ):
+                    break
+                # Still on this user's story?
+                try:
+                    current = (story_view.getUsername() or "").strip()
+                    if (
+                        current
+                        and current != "BUG!"
+                        and current.casefold() != username.casefold()
+                    ):
+                        break
+                except Exception:
+                    pass
+                try:
+                    logger.debug(f"@{username}: next story segment...")
+                    story_frame.click(
+                        mode=Location.RIGHTEDGE,
+                        sleep=SleepTime.ZERO,
+                        crash_report_if_fails=False,
+                    )
+                    random_sleep(*pause, modulable=False, log=False, minimum=0.05)
+                except Exception as exc:
+                    logger.debug("@%s: could not advance story: %s", username, exc)
+                    break
+                if not like_one():
+                    break
+        if likes_counter:
+            logger.info(
+                f"@{username}: liked {likes_counter} story segment(s).",
+                extra={"color": f"{Fore.GREEN}"},
+            )
     finally:
         logger.info(f"@{username}: closing story → back to list.")
         if not close_story_back_to_list(device):
@@ -1449,7 +1519,7 @@ def like_all_profile_stories(
 ) -> int:
     """Open profile stories, watch each segment, and like it. Returns segments liked."""
     check_instagram_rate_limit(device)
-    if not daily_story_likes and session_state.check_limit(
+    if session_state.check_limit(
         limit_type=session_state.Limit.WATCHES, output=True
     ):
         logger.info("Reached total watch limit, not watching stories.")
@@ -1495,8 +1565,10 @@ def like_all_profile_stories(
                 else:
                     logger.info("Story is already liked!")
                 likes_counter += 1
-                if not daily_story_likes:
-                    register_story_like(session_state)
+                # Count hearts for reporting + live progress (daily + normal).
+                register_story_like(session_state)
+                if likes_counter == 1:
+                    register_story_account_liked(session_state)
                 return True
             except Exception as exc:
                 logger.warning("Story like tap failed: %s", exc)
@@ -1504,13 +1576,12 @@ def like_all_profile_stories(
         return False
 
     def watch_story() -> bool:
-        if not daily_story_likes and session_state.check_limit(
+        if session_state.check_limit(
             limit_type=session_state.Limit.WATCHES, output=False
         ):
             return False
         logger.debug("Watching stories...")
-        if not daily_story_likes:
-            session_state.totalWatched += 1
+        session_state.totalWatched += 1
         if always_like_stories or already_open:
             like_story()
             return True
@@ -1523,8 +1594,8 @@ def like_all_profile_stories(
 
     stories_to_watch: int = get_value(args.stories_count, "Stories count: {}.", 1)
     if always_like_stories or already_open:
-        # Daily / list story likes: max 1 story like per account.
-        stories_to_watch = 1
+        # Daily / list story likes: like every segment on the profile, capped at 8.
+        stories_to_watch = 8
     if not already_open:
         logger.debug("Open the story container.")
         profile_view.StoryRing().click(sleep=story_open_sleep)
@@ -1570,10 +1641,9 @@ def like_all_profile_stories(
                 device.back()
             else:
                 break
-        if not daily_story_likes:
-            session_state.check_limit(
-                limit_type=session_state.Limit.WATCHES, output=True
-            )
+        session_state.check_limit(
+            limit_type=session_state.Limit.WATCHES, output=True
+        )
         logger.info(
             f"Liked {likes_counter} story segment(s) in {(datetime.now()-start).total_seconds():.2f}s."
         )

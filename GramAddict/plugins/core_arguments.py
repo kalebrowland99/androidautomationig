@@ -65,6 +65,36 @@ class CoreArguments(Plugin):
                 "default": "0",
             },
             {
+                "arg": "--daily-liked-posts-goal",
+                "nargs": None,
+                "help": (
+                    "display-only daily Liked Posts goal for Farm/Telegram "
+                    "(x/goal). Does not stop the bot. 0 = hide."
+                ),
+                "metavar": "100",
+                "default": "0",
+            },
+            {
+                "arg": "--daily-liked-stories-goal",
+                "nargs": None,
+                "help": (
+                    "display-only daily Liked Stories goal for Farm/Telegram "
+                    "(x/goal). Does not stop the bot. 0 = hide."
+                ),
+                "metavar": "300",
+                "default": "0",
+            },
+            {
+                "arg": "--daily-follows-goal",
+                "nargs": None,
+                "help": (
+                    "display-only daily Followed goal for Farm/Telegram "
+                    "(x/goal). Does not stop the bot. 0 = hide."
+                ),
+                "metavar": "150",
+                "default": "0",
+            },
+            {
                 "arg": "--total-unfollows-limit",
                 "nargs": None,
                 "help": "limit on total unfollows per session, 50 by default",
@@ -325,6 +355,18 @@ class CoreArguments(Plugin):
             {
                 "arg": "--end-if-pm-limit-reached",
                 "help": "end session if pm limit is reached",
+                "action": "store_true",
+            },
+            {
+                "arg": "--daily-story-pause",
+                "nargs": None,
+                "help": "seconds to wait between daily-story-likes accounts (e.g. 4-8). Reduces action-block risk.",
+                "metavar": "4-8",
+                "default": "3-7",
+            },
+            {
+                "arg": "--end-session-after-daily-story-likes",
+                "help": "after the daily-story-likes job finishes its batch, end the session instead of stacking more jobs",
                 "action": "store_true",
             },
             {

@@ -1,5 +1,6 @@
 import logging
 import random
+import traceback
 from datetime import datetime, timedelta
 from time import sleep
 
@@ -410,6 +411,24 @@ def start_bot(**kwargs):
                     logger.warning(str(exc))
                     rate_limited = True
                     break
+                except SystemExit:
+                    raise
+                except KeyboardInterrupt:
+                    raise
+                except Exception as exc:
+                    logger.error(
+                        "Job %s failed (%s: %s) — skipping to next job.",
+                        plugin,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    logger.error(traceback.format_exc())
+                    try:
+                        close_instagram(device)
+                        open_instagram(device)
+                    except Exception:
+                        pass
+                    continue
                 write_live_progress(
                     session_state.my_username,
                     session_state,
@@ -455,6 +474,26 @@ def start_bot(**kwargs):
                     logger.warning(str(exc))
                     rate_limited = True
                     break
+                except SystemExit:
+                    raise
+                except KeyboardInterrupt:
+                    raise
+                except Exception as exc:
+                    # Jobs are wrapped in run_safely, but anything that still
+                    # escapes should not kill the whole bot process.
+                    logger.error(
+                        "Job %s failed (%s: %s) — skipping to next job.",
+                        plugin,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    logger.error(traceback.format_exc())
+                    try:
+                        close_instagram(device)
+                        open_instagram(device)
+                    except Exception:
+                        pass
+                    continue
                 write_live_progress(
                     session_state.my_username,
                     session_state,
@@ -462,6 +501,13 @@ def start_bot(**kwargs):
                     current_job=plugin,
                 )
                 print_limits = True
+                if getattr(session_state, "end_session_after_job", False):
+                    logger.info(
+                        "Session end requested after daily story likes batch "
+                        "(avoid stacking more jobs into an action block).",
+                        extra={"color": f"{Fore.CYAN}"},
+                    )
+                    break
 
         if rate_limited:
             session_state.finishTime = datetime.now()
@@ -581,5 +627,15 @@ def start_bot(**kwargs):
         followers_now,
         following_now,
     )
+    if session_state is not None and session_state.my_username:
+        write_live_progress(
+            session_state.my_username,
+            session_state,
+            running=False,
+            sleeping=False,
+            next_session_at=None,
+            rate_limited=False,
+            current_job=None,
+        )
     print_full_report(sessions, configs.args.scrape_to_file)
     ask_for_a_donation()

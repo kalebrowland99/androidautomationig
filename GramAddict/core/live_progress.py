@@ -64,6 +64,7 @@ def write_live_progress(
         "total_unfollowed": session_state.totalUnfollowed,
         "total_watched": session_state.totalWatched,
         "total_story_likes": session_state.totalStoryLikes,
+        "total_story_accounts_liked": session_state.totalStoryAccountsLiked,
         "total_daily_story_accounts": session_state.totalDailyStoryAccounts,
         "daily_story_likes_limit": session_state.daily_story_likes_limit,
         "total_comments": session_state.totalComments,
@@ -76,6 +77,22 @@ def write_live_progress(
             "comments": getattr(session_state.args, "current_comments_limit", None),
         },
     }
+    try:
+        from GramAddict.core.day_stats import daily_goals_from_args, today_action_totals
+
+        today = today_action_totals(username, current_session=session_state)
+        goals = daily_goals_from_args(getattr(session_state, "args", None))
+        payload["today"] = {
+            "likes": today["likes"],
+            "story_likes": today["story_likes"],
+            "story_accounts_liked": today["story_accounts_liked"],
+            "follows": today["follows"],
+            "likes_goal": goals["likes"],
+            "story_likes_goal": goals["stories"],
+            "follows_goal": goals["follows"],
+        }
+    except Exception as exc:
+        logger.debug("Could not attach today totals for %s: %s", username, exc)
     try:
         with atomic_write(path, overwrite=True, encoding="utf-8") as handle:
             json.dump(payload, handle, indent=2)

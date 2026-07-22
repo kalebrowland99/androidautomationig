@@ -175,6 +175,11 @@ class TapRequest(BaseModel):
     bounds: list[int] = Field(..., min_length=4, max_length=4)
 
 
+class TypeTextRequest(BaseModel):
+    text: str = ""
+    enter: bool = False
+
+
 class DebugRunBody(BaseModel):
     vpn_app_name: str = "Shadowrocket"
     target_username: Optional[str] = None
@@ -571,6 +576,23 @@ async def api_home(serial: str) -> dict[str, bool]:
     try:
         await _device_call(device_service.press_home, serial)
         return {"ok": True}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/devices/{serial}/type")
+async def api_type_text(serial: str, body: TypeTextRequest) -> dict[str, Any]:
+    """Type into the focused field on the phone (dashboard text box → device)."""
+    _check_serial(serial)
+    try:
+        return await _device_call(
+            device_service.send_text,
+            serial,
+            body.text,
+            press_enter=body.enter,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

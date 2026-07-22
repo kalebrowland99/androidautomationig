@@ -450,8 +450,11 @@ def close_instagram(device):
 
 
 def check_if_crash_popup_is_there(device) -> bool:
-    check_instagram_rate_limit(device)
-    obj = device.find(resourceId=ResourceID.CRASH_POPUP)
+    # Use find_any — system crash dialogs (and rate-limit checks) must work
+    # even when Instagram is not the foreground app / was just closed.
+    if device._ig_is_opened():
+        check_instagram_rate_limit(device)
+    obj = device.find_any(resourceId=ResourceID.CRASH_POPUP)
     if obj.exists():
         obj.click()
         return True
@@ -466,10 +469,11 @@ def is_instagram_try_again_later_visible(device) -> bool:
     """True when Instagram's 'Try Again Later' action-limit dialog is on screen."""
     from GramAddict.core.device_facade import Timeout
 
-    title = device.find(textMatches=_case_insensitive_re(r"try\s+again\s+later"))
+    # find_any: don't raise AppHasCrashed if IG briefly lost focus mid-navigation.
+    title = device.find_any(textMatches=_case_insensitive_re(r"try\s+again\s+later"))
     if title.exists(Timeout.ZERO):
         return True
-    limit_msg = device.find(
+    limit_msg = device.find_any(
         textMatches=_case_insensitive_re(r"we\s+limit\s+how\s+often")
     )
     if limit_msg.exists(Timeout.ZERO):
@@ -478,7 +482,7 @@ def is_instagram_try_again_later_visible(device) -> bool:
         ResourceID.IGDS_HEADLINE_EMPHASIZED_HEADLINE,
         ResourceID.IGDS_HEADLINE_BODY,
     ):
-        obj = device.find(resourceIdMatches=rid)
+        obj = device.find_any(resourceIdMatches=rid)
         if not obj.exists(Timeout.ZERO):
             continue
         # Element can vanish between exists() and get_text() during fast
@@ -497,7 +501,7 @@ def dismiss_instagram_try_again_later(device) -> bool:
         dict(resourceIdMatches=ResourceID.NEGATIVE_BUTTON),
         dict(textMatches=_case_insensitive_re(r"^ok$")),
     ):
-        btn = device.find(**matcher)
+        btn = device.find_any(**matcher)
         if btn.exists(Timeout.TINY):
             logger.info("Dismissing Instagram 'Try Again Later' dialog.")
             btn.click()
@@ -549,7 +553,7 @@ def take_rate_limit_break(device, session_state, sessions, configs) -> None:
     send_telegram_alert(
         username,
         "Action limit",
-        f"Back {next_session_at.strftime('%I:%M %p')} ({hours_label})",
+        f"back {next_session_at.strftime('%I:%M %p').lstrip('0')}",
         stopped=False,
     )
     close_instagram(device)
@@ -832,6 +836,17 @@ def stop_bot(device, sessions, session_state, was_sleeping=False):
         extra={"color": f"{Style.BRIGHT}{Fore.YELLOW}"},
     )
     if session_state is not None:
+        from GramAddict.core.live_progress import write_live_progress
+
+        write_live_progress(
+            session_state.my_username,
+            session_state,
+            running=False,
+            sleeping=False,
+            next_session_at=None,
+            rate_limited=False,
+            current_job=None,
+        )
         print_full_report(sessions, configs.args.scrape_to_file)
         if not was_sleeping:
             sessions.persist(directory=session_state.my_username)
@@ -1021,18 +1036,30 @@ def set_time_delta(args):
 
 
 def wait_for_next_session(time_left, session_state, sessions, device):
+    from GramAddict.core.live_progress import write_live_progress
+
     hours, remainder = divmod(time_left.seconds, 3600)
     minutes, seconds = divmod(remainder, 60)
     if args.kill_atx_agent:
         kill_atx_agent(device)
+    next_session_at = datetime.now() + time_left
     logger.info(
-        f'Next session will start at: {(datetime.now()+ time_left).strftime("%I:%M:%S %p (%Y/%m/%d)")}.',
+        f'Next session will start at: {next_session_at.strftime("%I:%M:%S %p (%Y/%m/%d)")}.',
         extra={"color": f"{Fore.GREEN}"},
     )
     logger.info(
         f"Time left: {hours:02d}:{minutes:02d}:{seconds:02d}.",
         extra={"color": f"{Fore.GREEN}"},
     )
+    if session_state is not None and session_state.my_username:
+        write_live_progress(
+            session_state.my_username,
+            session_state,
+            running=True,
+            sleeping=True,
+            next_session_at=next_session_at.isoformat(timespec="seconds"),
+            rate_limited=False,
+        )
     try:
         sleep(time_left.total_seconds())
     except KeyboardInterrupt:

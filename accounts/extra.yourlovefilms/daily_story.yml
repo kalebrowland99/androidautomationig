@@ -1,0 +1,4 @@
+enabled: false
+posts-per-day: 1
+caption-prompt: Write one short casual Instagram story caption. Return only the caption
+  text — no quotes, no hashtags.

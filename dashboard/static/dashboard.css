@@ -1586,6 +1586,20 @@ body.brand-labely .phones-td-warmup {
   color: hsl(142 76% 30%);
 }
 
+.status-tag.waiting {
+  background: hsl(210 80% 50% / 0.12);
+  color: hsl(210 70% 35%);
+  text-transform: none;
+  letter-spacing: 0.01em;
+}
+
+.status-tag.action-limit {
+  background: #ffedd5;
+  color: #9a3412;
+  text-transform: none;
+  letter-spacing: 0.01em;
+}
+
 .status-tag.inactive {
   background: hsl(var(--muted));
   color: hsl(var(--muted-foreground));
@@ -1930,45 +1944,72 @@ body.brand-labely .phones-td-warmup {
   letter-spacing: 0.01em;
 }
 
-.phones-account-sleeping {
-  display: inline-block;
-  margin-left: 0.15rem;
-  font-size: 0.75rem;
-  line-height: 1;
-  vertical-align: middle;
-  cursor: default;
-  animation: sleeping-pulse 2.4s ease-in-out infinite;
+.phones-account-today {
+  color: hsl(210 40% 40%);
 }
 
-@keyframes sleeping-pulse {
-  0%, 100% { opacity: 0.55; }
-  50% { opacity: 1; }
-}
-
-.phones-account-action-limit {
+.phones-account-status {
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
   gap: 0.35rem;
   line-height: 1.25;
+  margin-top: 0.1rem;
 }
 
-.phones-account-action-limit-tag {
+.phones-status-tag {
   display: inline-block;
   font-size: 0.625rem;
   font-weight: 650;
   letter-spacing: 0.02em;
   text-transform: uppercase;
-  color: #9a3412;
-  background: #ffedd5;
-  border: 1px solid #fdba74;
   border-radius: 0.25rem;
   padding: 0.05rem 0.35rem;
+  border: 1px solid transparent;
 }
 
-.phones-account-action-limit-when {
-  font-size: 0.6875rem;
+.phones-status-tag.running {
+  color: hsl(142 76% 28%);
+  background: hsl(142 76% 36% / 0.12);
+  border-color: hsl(142 50% 45% / 0.35);
+}
+
+.phones-status-tag.waiting {
+  color: hsl(210 70% 35%);
+  background: hsl(210 80% 50% / 0.12);
+  border-color: hsl(210 60% 50% / 0.35);
+}
+
+.phones-status-tag.action-limit {
+  color: #9a3412;
+  background: #ffedd5;
+  border-color: #fdba74;
+}
+
+.phones-status-tag.stopped {
   color: hsl(var(--muted-foreground));
+  background: hsl(var(--muted));
+  border-color: hsl(var(--border));
+}
+
+.phones-status-when {
+  font-size: 0.6875rem;
+  font-weight: 550;
+  color: hsl(var(--muted-foreground));
+}
+
+.phones-status-tag.action-limit + .phones-status-when {
+  color: #9a3412;
+}
+
+.phones-status-tag.waiting + .phones-status-when {
+  color: hsl(210 70% 35%);
+}
+
+.phones-status-tag.running + .phones-status-when {
+  color: hsl(142 50% 32%);
+  text-transform: none;
+  font-weight: 500;
 }
 
 .phones-account-note {
@@ -2274,6 +2315,35 @@ body.brand-labely .phones-td-warmup {
 
 .context-strip-actions {
   margin-left: auto;
+}
+
+.ctx-type-form {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-right: 0.15rem;
+}
+
+.ctx-type-input {
+  width: min(16rem, 42vw);
+  min-width: 8rem;
+  height: 1.75rem;
+  padding: 0 0.5rem;
+  font-size: 0.75rem;
+  border: 1px solid hsl(var(--border));
+  border-radius: 0.375rem;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+}
+
+.ctx-type-input:disabled {
+  opacity: 0.5;
+}
+
+.ctx-type-input:focus {
+  outline: none;
+  border-color: hsl(210 70% 50%);
+  box-shadow: 0 0 0 2px hsl(210 70% 50% / 0.15);
 }
 
 .farm-header {

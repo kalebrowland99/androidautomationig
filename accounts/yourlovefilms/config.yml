@@ -5,7 +5,7 @@ ensure-vpn: false
 vpn-app-name: Shadowrocket
 screen-sleep: false
 screen-record: true
-speed-multiplier: '3'
+speed-multiplier: '1.5'
 debug: false
 close-apps: false
 kill-atx-agent: false
@@ -26,7 +26,7 @@ sort-followers-newest-to-oldest: false
 unfollow-delay: '15'
 delete-removed-followers: true
 telegram-reports: true
-interactions-count: 30-40
+interactions-count: 20-30
 likes-count: '0'
 likes-percentage: '0'
 stories-count: '1'
@@ -42,22 +42,25 @@ min-following: '100'
 total-likes-limit: 80-120
 total-follows-limit: 100-180
 total-follows-limit-daily: '150'
+daily-liked-posts-goal: '20'
+daily-liked-stories-goal: '300'
+daily-follows-goal: '150'
 total-unfollows-limit: 40-50
-total-watches-limit: 120-150
-total-successful-interactions-limit: 120-150
-total-interactions-limit: 280-300
+total-watches-limit: 40-60
+total-successful-interactions-limit: 25-40
+total-interactions-limit: 60-100
 total-comments-limit: 80-100
 total-pm-limit: '0'
 total-scraped-limit: 100-150
 end-if-likes-limit-reached: false
 end-if-follows-limit-reached: true
-end-if-watches-limit-reached: false
+end-if-watches-limit-reached: true
 end-if-comments-limit-reached: false
 end-if-pm-limit-reached: false
 working-hours: [5.00-23.50]
 time-delta: '1'
 total-sessions: '-1'
-repeat: 1-2
+repeat: 25-40
 max-comments-pro-user: '1'
 comment-percentage: '0'
 interact-percentage: '100'
@@ -67,3 +70,5 @@ blogger-followers: [drakewoodfarm, legacyfarmstn, sycamorefarmsevents, thecordel
 blogger-post-likers: [drakewoodfarm, legacyfarmstn, sycamorefarmsevents, thecordelle, thewhitedovebarn, fireflylaneweddings, cedarmontfarm, themonroeon415th, cheekwoodweddings, riverwoodmansion]
 username: yourlovefilms
 device: 988dd237354e485243
+comment-cooldown-days: '7'
+rate-limit-break: '720'
