@@ -38,3 +38,21 @@ max_followings: 8000
 ignore_following_count: true
 ignore_potency: true
 blacklist_words_name: [nashville, photo, photos, photograher, videographer, film, films, venue, wedding]
+# Skip story likes when @handle or display name contains these (substring match,
+# including inside compound usernames like texaphotossleep / lrow.photography).
+skip_story_like:
+  - photo
+  - photos
+  - photography
+  - film
+  - films
+  - event
+  - events
+  - create
+  - creates
+  - moment
+  - moments
+  - flower
+  - flowers
+  - floral
+  - florals

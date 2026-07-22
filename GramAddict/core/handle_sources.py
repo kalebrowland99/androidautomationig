@@ -12,6 +12,7 @@ from GramAddict.core.interaction import (
     find_list_row_story_ring,
     like_all_profile_stories,
     like_stories_from_list_row,
+    list_row_display_name,
     list_story_likes_only,
     register_daily_story_account,
 )
@@ -398,6 +399,40 @@ def interact_list_story_ring(
             extra={"color": f"{Fore.GREEN}"},
         )
         return False
+
+    display_name = list_row_display_name(row)
+    profile_filter = getattr(storage, "profile_filter", None)
+    if profile_filter is not None:
+        hit = profile_filter.should_skip_story_like(username, display_name)
+        if hit:
+            logger.info(
+                f"@{username}: skip story like — matched skip_story_like "
+                f"keyword '{hit}'"
+                + (f" (name: {display_name})" if display_name else "")
+                + ".",
+                extra={"color": f"{Fore.CYAN}"},
+            )
+            return None
+
+    # Brand-pool shared daily set: any pool account already liked them today.
+    pool_id = getattr(storage, "brand_pool", None)
+    if pool_id:
+        try:
+            from GramAddict.core.brand_pool import (
+                mark_story_liked_today,
+                was_story_liked_today,
+            )
+
+            if was_story_liked_today(pool_id, username):
+                logger.info(
+                    f"@{username}: skip — already story-liked today by brand pool "
+                    f"'{pool_id}'.",
+                    extra={"color": f"{Fore.CYAN}"},
+                )
+                return None
+        except Exception as exc:
+            logger.debug("Pool story-liked-today check failed: %s", exc)
+
     watched = like_stories_from_list_row(
         device, row, username, self.args, session_state
     )
@@ -416,6 +451,18 @@ def interact_list_story_ring(
         commented=0,
         pm_sent=False,
     )
+    if pool_id:
+        try:
+            from GramAddict.core.brand_pool import mark_story_liked_today
+
+            mark_story_liked_today(
+                pool_id,
+                username,
+                by_account=getattr(storage, "my_username", None)
+                or getattr(session_state, "my_username", None),
+            )
+        except Exception as exc:
+            logger.debug("Pool story-liked-today mark failed: %s", exc)
     if not on_interaction(
         succeed=True,
         followed=False,
@@ -727,6 +774,44 @@ def handle_daily_story_likes_from_file(self, device, parameter_passed, storage):
                 save_metadata(current_position, failed_loads)
                 continue
 
+            profile_filter = getattr(storage, "profile_filter", None)
+            if profile_filter is not None:
+                hit = profile_filter.should_skip_story_like(username)
+                if hit:
+                    logger.info(
+                        f"@{username}: skip story like — matched skip_story_like "
+                        f"keyword '{hit}'.",
+                        extra={"color": f"{Fore.CYAN}"},
+                    )
+                    append_story_likes_log(
+                        storage.my_username,
+                        f"@{username}: skip_story_like '{hit}' — skip.",
+                    )
+                    current_position = next_position
+                    save_metadata(current_position, failed_loads)
+                    continue
+
+            pool_id = getattr(storage, "brand_pool", None)
+            if pool_id:
+                try:
+                    from GramAddict.core.brand_pool import was_story_liked_today
+
+                    if was_story_liked_today(pool_id, username):
+                        logger.info(
+                            f"@{username}: skip — already story-liked today by "
+                            f"brand pool '{pool_id}'.",
+                            extra={"color": f"{Fore.CYAN}"},
+                        )
+                        append_story_likes_log(
+                            storage.my_username,
+                            f"@{username}: already story-liked today (pool) — skip.",
+                        )
+                        current_position = next_position
+                        save_metadata(current_position, failed_loads)
+                        continue
+                except Exception as exc:
+                    logger.debug("Pool story-liked-today check failed: %s", exc)
+
             opened, account_missing = navigate_to_profile_via_url(
                 device, username, fast=True
             )
@@ -792,6 +877,18 @@ def handle_daily_story_likes_from_file(self, device, parameter_passed, storage):
                     storage.my_username,
                     f"@{username}: liked {liked} story segment(s).",
                 )
+                pool_id = getattr(storage, "brand_pool", None)
+                if pool_id:
+                    try:
+                        from GramAddict.core.brand_pool import mark_story_liked_today
+
+                        mark_story_liked_today(
+                            pool_id,
+                            username,
+                            by_account=storage.my_username,
+                        )
+                    except Exception as exc:
+                        logger.debug("Pool story-liked-today mark failed: %s", exc)
             else:
                 append_story_likes_log(
                     storage.my_username,
@@ -1025,6 +1122,36 @@ def handle_likers(
                                 continue
                             if username in story_no_ring_likers:
                                 continue
+                            pool_id = getattr(storage, "brand_pool", None)
+                            if pool_id:
+                                try:
+                                    from GramAddict.core.brand_pool import (
+                                        was_story_liked_today,
+                                    )
+
+                                    if was_story_liked_today(pool_id, username):
+                                        logger.info(
+                                            f"@{username}: skip — already story-liked "
+                                            f"today by brand pool '{pool_id}'.",
+                                            extra={"color": f"{Fore.CYAN}"},
+                                        )
+                                        story_no_ring_likers.add(username)
+                                        continue
+                                except Exception:
+                                    pass
+                            profile_filter = getattr(storage, "profile_filter", None)
+                            if profile_filter is not None:
+                                hit = profile_filter.should_skip_story_like(
+                                    username, list_row_display_name(item)
+                                )
+                                if hit:
+                                    logger.info(
+                                        f"@{username}: skip story like — matched "
+                                        f"skip_story_like keyword '{hit}'.",
+                                        extra={"color": f"{Fore.CYAN}"},
+                                    )
+                                    story_no_ring_likers.add(username)
+                                    continue
                             ring = find_list_row_story_ring(item, username)
                             if ring is None:
                                 logger.info(
@@ -1624,6 +1751,36 @@ def iterate_over_followers(
                             continue
                         if username in story_no_ring_usernames:
                             continue
+                        pool_id = getattr(storage, "brand_pool", None)
+                        if pool_id:
+                            try:
+                                from GramAddict.core.brand_pool import (
+                                    was_story_liked_today,
+                                )
+
+                                if was_story_liked_today(pool_id, username):
+                                    logger.info(
+                                        f"@{username}: skip — already story-liked "
+                                        f"today by brand pool '{pool_id}'.",
+                                        extra={"color": f"{Fore.CYAN}"},
+                                    )
+                                    story_no_ring_usernames.add(username)
+                                    continue
+                            except Exception:
+                                pass
+                        profile_filter = getattr(storage, "profile_filter", None)
+                        if profile_filter is not None:
+                            hit = profile_filter.should_skip_story_like(
+                                username, list_row_display_name(item)
+                            )
+                            if hit:
+                                logger.info(
+                                    f"@{username}: skip story like — matched "
+                                    f"skip_story_like keyword '{hit}'.",
+                                    extra={"color": f"{Fore.CYAN}"},
+                                )
+                                story_no_ring_usernames.add(username)
+                                continue
                         ring = find_list_row_story_ring(item, username)
                         if ring is None:
                             logger.info(

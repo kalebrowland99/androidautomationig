@@ -125,6 +125,7 @@ FILTER_HELP: dict[str, str] = {
     "blacklist_words_bio": "Skip only if the bio contains any of these words (whole-word match). One per line.",
     "blacklist_words_name": "Skip only if the display name contains any of these words (whole-word match). One per line.",
     "blacklist_words_handle": "Skip only if the @handle contains any of these words (matches anywhere, since handles have no spaces). One per line.",
+    "skip_story_like": "Skip liking stories if the @handle or display name contains any of these words (matches inside compound usernames too, e.g. texaphotossleep / lrow.photography). One per line.",
     "mandatory_words": "Only interact if their bio or name contains at least one of these words.",
     "specific_alphabet": "Only interact if their text uses these alphabets (e.g. LATIN).",
     "biography_language": "Only interact if their bio appears to be in these languages.",

@@ -1232,6 +1232,27 @@ def _bounds_overlap_y(a: dict, b: dict) -> bool:
     return not (a["bottom"] <= b["top"] or a["top"] >= b["bottom"])
 
 
+def list_row_display_name(row) -> Optional[str]:
+    """Best-effort display name from a followers/likers list row."""
+    if row is None or ResourceID is None:
+        return None
+    for rid in (
+        getattr(ResourceID, "ROW_USER_PRIMARY_NAME", None),
+        getattr(ResourceID, "SECONDARY_LABEL", None),
+    ):
+        if not rid:
+            continue
+        try:
+            view = row.child(resourceIdMatches=case_insensitive_re(rid))
+            if view.exists(Timeout.ZERO):
+                text = (view.get_text() or "").strip()
+                if text and not text.startswith("@"):
+                    return text
+        except Exception:
+            continue
+    return None
+
+
 def find_list_row_story_ring(row, username: str):
     """Return the clickable story-ring control in a followers/likers row, or None.
 
@@ -1365,7 +1386,7 @@ def like_stories_from_list_row(
     args: Namespace,
     session_state: SessionState,
 ) -> int:
-    """Tap the list-row story ring and like up to 8 story segments.
+    """Tap the list-row story ring and like up to 4 story segments.
 
     Always tries to land back on the followers/likers list so the next row
     iteration is not left on a profile or inside the story viewer.
@@ -1409,8 +1430,8 @@ def like_stories_from_list_row(
         close_story_back_to_list(device)
         return 0
 
-    # Like every segment on this profile, capped at 8 (same as profile path).
-    stories_to_like = 8
+    # Like every segment on this profile, capped at 4 (same as profile path).
+    stories_to_like = 4
     likes_counter = 0
     pause = (0.1, 0.2)
     after_like = (0.1, 0.17)
@@ -1501,8 +1522,8 @@ def like_stories_from_list_row(
             )
         else:
             logger.info(f"@{username}: back on followers/likers list.")
-    # Return >0 whenever the viewer opened so the list loop can scroll onward.
-    return likes_counter if likes_counter > 0 else 1
+    # Actual segments liked (0 = opened but no heart / no ring success).
+    return likes_counter
 
 
 def like_all_profile_stories(
@@ -1524,6 +1545,28 @@ def like_all_profile_stories(
     ):
         logger.info("Reached total watch limit, not watching stories.")
         return 0
+
+    # skip_story_like from filters.yml (username / display name keywords).
+    try:
+        storage = getattr(session_state, "storage", None)
+        profile_filter = getattr(storage, "profile_filter", None) if storage else None
+        display_name = None
+        try:
+            if profile_view is not None and hasattr(profile_view, "getFullName"):
+                display_name = profile_view.getFullName()
+        except Exception:
+            display_name = None
+        if profile_filter is not None:
+            hit = profile_filter.should_skip_story_like(username, display_name)
+            if hit:
+                logger.info(
+                    f"@{username}: skip story like — matched skip_story_like "
+                    f"keyword '{hit}'.",
+                    extra={"color": f"{Fore.CYAN}"},
+                )
+                return 0
+    except Exception:
+        pass
 
     if not already_open:
         if always_like_stories:
@@ -1594,8 +1637,8 @@ def like_all_profile_stories(
 
     stories_to_watch: int = get_value(args.stories_count, "Stories count: {}.", 1)
     if always_like_stories or already_open:
-        # Daily / list story likes: like every segment on the profile, capped at 8.
-        stories_to_watch = 8
+        # Daily / list story likes: like every segment on the profile, capped at 4.
+        stories_to_watch = 4
     if not already_open:
         logger.debug("Open the story container.")
         profile_view.StoryRing().click(sleep=story_open_sleep)

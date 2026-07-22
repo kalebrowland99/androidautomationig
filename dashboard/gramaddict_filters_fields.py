@@ -34,6 +34,7 @@ FILTER_FIELDS: dict[str, list[dict[str, Any]]] = {
         {"key": "blacklist_words_bio", "label": "Skip if bio has these words", "type": "lines"},
         {"key": "blacklist_words_name", "label": "Skip if display name has these words", "type": "lines"},
         {"key": "blacklist_words_handle", "label": "Skip if @handle has these words", "type": "lines"},
+        {"key": "skip_story_like", "label": "Skip story likes if @handle or name contains", "type": "lines"},
         {"key": "mandatory_words", "label": "Only if bio contains these words", "type": "lines"},
         {"key": "specific_alphabet", "label": "Allowed alphabets", "type": "lines"},
         {"key": "biography_language", "label": "Allowed bio languages", "type": "lines"},

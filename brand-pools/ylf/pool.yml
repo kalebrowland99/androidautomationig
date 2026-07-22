@@ -1,5 +1,5 @@
 name: YLF
-accounts: [clips.yourlovefilms, extra.yourlovefilms, extras.yourlovefilms, more.yourlovefilms,
-  reeels.yourlovefilms, reel.yourlovefilms, shorts.yourlovefilms, clipped.yourlovefilms,
-  clipper.yourlovefilms]
+accounts: [yourlovefilms, clips.yourlovefilms, extra.yourlovefilms, extras.yourlovefilms,
+  more.yourlovefilms, reeels.yourlovefilms, reel.yourlovefilms, shorts.yourlovefilms,
+  clipped.yourlovefilms, clipper.yourlovefilms]
 posting-enabled: false

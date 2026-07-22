@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 BRAND_POOLS_DIR = PROJECT_ROOT / "brand-pools"
 INTERACTED_FILENAME = "interacted_users.json"
+STORY_LIKED_TODAY_FILENAME = "story_liked_today.json"
 
 KNOWN_POOLS: dict[str, str] = {
     "615films": "615Films",
@@ -267,3 +268,127 @@ def interacted_users_path(pool_id: str) -> str:
         raise ValueError("brand pool required")
     ensure_pool(pool_id)
     return str(_interacted_path(pool_id))
+
+
+def _story_liked_today_path(pool_id: str) -> Path:
+    return _pool_dir(pool_id) / STORY_LIKED_TODAY_FILENAME
+
+
+def _empty_story_liked_today(day: Optional[str] = None) -> dict[str, Any]:
+    from datetime import date
+
+    return {"date": day or date.today().isoformat(), "users": {}}
+
+
+def _load_story_liked_today_unlocked(pool_id: str) -> dict[str, Any]:
+    """Load pool story-liked-today file; auto-reset when the calendar day changes."""
+    from datetime import date
+
+    today = date.today().isoformat()
+    path = _story_liked_today_path(pool_id)
+    if not path.is_file():
+        return _empty_story_liked_today(today)
+    try:
+        with path.open(encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("Could not read %s: %s — starting fresh for today.", path, exc)
+        return _empty_story_liked_today(today)
+    if not isinstance(data, dict):
+        return _empty_story_liked_today(today)
+    if str(data.get("date") or "") != today:
+        # New day — live shared set resets to empty.
+        return _empty_story_liked_today(today)
+    users = data.get("users")
+    if not isinstance(users, dict):
+        users = {}
+    return {"date": today, "users": users}
+
+
+def _save_story_liked_today_unlocked(pool_id: str, data: dict[str, Any]) -> None:
+    path = _story_liked_today_path(pool_id)
+    with atomic_write(path, overwrite=True, encoding="utf-8") as handle:
+        json.dump(data, handle, indent=2, sort_keys=False)
+
+
+def _with_story_liked_today_lock(pool_id: str):
+    """Exclusive lock so parallel pool bots don't clobber each other's writes."""
+    import fcntl
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _lock():
+        ensure_pool(pool_id)
+        lock_path = _pool_dir(pool_id) / ".story_liked_today.lock"
+        lock_path.touch(exist_ok=True)
+        with lock_path.open("a+", encoding="utf-8") as lock_f:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+
+    return _lock()
+
+
+def was_story_liked_today(pool_id: str | None, username: str | None) -> bool:
+    """True if any account in this brand pool already liked this user's stories today."""
+    pool_id = normalize_pool_id(pool_id)
+    want = (username or "").strip().lstrip("@").casefold()
+    if not pool_id or not want:
+        return False
+    with _with_story_liked_today_lock(pool_id):
+        data = _load_story_liked_today_unlocked(pool_id)
+        users = data.get("users") or {}
+        for key in users:
+            if str(key).strip().lstrip("@").casefold() == want:
+                return True
+        return False
+
+
+def mark_story_liked_today(
+    pool_id: str | None,
+    username: str | None,
+    *,
+    by_account: str | None = None,
+) -> bool:
+    """Record a successful story like for today in the shared pool file.
+
+    Returns True if newly recorded (or refreshed), False if pool/username invalid.
+    """
+    from datetime import datetime
+
+    pool_id = normalize_pool_id(pool_id)
+    clean = (username or "").strip().lstrip("@")
+    if not pool_id or not clean:
+        return False
+    with _with_story_liked_today_lock(pool_id):
+        data = _load_story_liked_today_unlocked(pool_id)
+        users = data.setdefault("users", {})
+        if not isinstance(users, dict):
+            users = {}
+            data["users"] = users
+        # Prefer a stable key (original casing of first writer).
+        existing_key = None
+        want = clean.casefold()
+        for key in users:
+            if str(key).strip().lstrip("@").casefold() == want:
+                existing_key = key
+                break
+        key = existing_key or clean
+        users[key] = {
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "by": (by_account or "").strip().lstrip("@") or None,
+        }
+        _save_story_liked_today_unlocked(pool_id, data)
+    return True
+
+
+def story_liked_today_count(pool_id: str | None) -> int:
+    pool_id = normalize_pool_id(pool_id)
+    if not pool_id:
+        return 0
+    with _with_story_liked_today_lock(pool_id):
+        data = _load_story_liked_today_unlocked(pool_id)
+        users = data.get("users") or {}
+        return len(users) if isinstance(users, dict) else 0

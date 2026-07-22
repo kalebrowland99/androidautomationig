@@ -47,6 +47,9 @@ FIELD_BLACKLIST_WORDS = "blacklist_words"
 FIELD_BLACKLIST_WORDS_BIO = "blacklist_words_bio"
 FIELD_BLACKLIST_WORDS_NAME = "blacklist_words_name"
 FIELD_BLACKLIST_WORDS_HANDLE = "blacklist_words_handle"
+# Skip story likes when @handle or display name contains these substrings
+# (matches inside compound usernames like texaphotossleep / lrow.photography).
+FIELD_SKIP_STORY_LIKE = "skip_story_like"
 FIELD_MANDATORY_WORDS = "mandatory_words"
 FIELD_SPECIFIC_ALPHABET = "specific_alphabet"
 FIELD_BIO_LANGUAGE = "biography_language"
@@ -57,6 +60,47 @@ FIELD_MAX_LIKERS = "max_likers"
 FIELD_MUTUAL_FRIENDS = "mutual_friends"
 
 IGNORE_CHARSETS = ["MATHEMATICAL"]
+
+
+def _normalize_story_like_text(value: Optional[str]) -> Tuple[str, str]:
+    """Return (lowercase_raw, alphanumeric_only) for substring keyword matching."""
+    raw = (value or "").strip().lstrip("@").lower()
+    # Keep dots/underscores out of the compact form so lrow.photography → lrowphotography
+    # still matches "photography", and texaphotossleep still matches "photo".
+    compact = re.sub(r"[^a-z0-9]", "", raw)
+    return raw, compact
+
+
+def match_skip_story_like_keyword(
+    username: Optional[str],
+    display_name: Optional[str],
+    keywords,
+) -> Optional[str]:
+    """Return the matched keyword if @handle or display name should skip a story like.
+
+    Matching is case-insensitive and substring-based (including inside one long
+    compound username with no separators).
+    """
+    if not keywords:
+        return None
+    haystacks = []
+    for value in (username, display_name):
+        raw, compact = _normalize_story_like_text(value)
+        if raw:
+            haystacks.append(raw)
+        if compact and compact != raw:
+            haystacks.append(compact)
+    if not haystacks:
+        return None
+    for raw_kw in keywords:
+        word = str(raw_kw).lower().strip().lstrip("@")
+        if not word:
+            continue
+        compact_word = re.sub(r"[^a-z0-9]", "", word)
+        for hay in haystacks:
+            if word in hay or (compact_word and compact_word in hay):
+                return str(raw_kw).strip()
+    return None
 
 
 def load_config(config):
@@ -83,6 +127,7 @@ class SkipReason(Enum):
     HAS_NON_BUSINESS = auto()
     NOT_ENOUGH_POSTS = auto()
     BLACKLISTED_WORD = auto()
+    SKIP_STORY_LIKE = auto()
     MISSING_MANDATORY_WORDS = auto()
     ALPHABET_NOT_MATCH = auto()
     ALPHABET_NAME_NOT_MATCH = auto()
@@ -163,6 +208,9 @@ class Filter:
                     )
                     sys.exit(2)
         self.storage = storage
+        if storage is not None:
+            # So story-like paths can call storage.profile_filter.should_skip_story_like
+            storage.profile_filter = self
         if self.conditions is not None:
             logger.info("-" * 70, extra={"color": f"{Fore.YELLOW}{Style.BRIGHT}"})
             logger.info(
@@ -612,6 +660,17 @@ class Filter:
         return field_pm_to_private_or_empty is not None and bool(
             field_pm_to_private_or_empty
         )
+
+    def should_skip_story_like(
+        self, username: Optional[str], display_name: Optional[str] = None
+    ) -> Optional[str]:
+        """If story likes should skip this account, return the matched keyword."""
+        if self.conditions is None:
+            return None
+        keywords = self.conditions.get(FIELD_SKIP_STORY_LIKE) or []
+        if isinstance(keywords, str):
+            keywords = [keywords]
+        return match_skip_story_like_keyword(username, display_name, keywords)
 
     def can_comment(self, current_mode) -> Tuple[bool, bool, bool, bool]:
         if self.conditions is not None:

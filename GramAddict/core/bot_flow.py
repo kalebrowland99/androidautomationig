@@ -350,6 +350,7 @@ def start_bot(**kwargs):
             ig_username=session_state.my_username,
         )
         storage = Storage(session_state.my_username, brand_pool=brand_pool)
+        session_state.storage = storage
         filters = Filter(storage)
         show_ending_conditions()
         if not configs.args.debug:
