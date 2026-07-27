@@ -6,6 +6,7 @@ CONFIG_HELP: dict[str, str] = {
     "username": "The Instagram account logged in on the phone. Same as your @ handle, without the @.",
     "brand-pool": "Share follow/like/comment history with other accounts in this brand. Same-brand accounts won't interact with the same people twice. Target bloggers (post likers, followers, etc.) can still overlap.",
     "device": "Only needed with multiple phones plugged in. Leave blank to use the phone you picked on Farm.",
+    "unlock-pin": "Digits for the phone lock screen. The bot types them after swipe-up and does not tap OK — the phone should auto-unlock after the last digit.",
     "app-id": "Leave the default unless you use a special copy of Instagram. Advanced users only.",
     "use-cloned-app": "Turn on if Instagram is a duplicate app, not the normal one from the app store.",
     "allow-untested-ig-version": "Allow running when your Instagram app is newer than what GramAddict tested. May be less stable.",
@@ -27,11 +28,12 @@ CONFIG_HELP: dict[str, str] = {
     "feed": "How many posts to like while scrolling your home feed.",
     "daily-story-likes": "Visit every account in story_likes.txt each run (ignores interaction history). Always likes every story segment (seen or new), then moves on. Artists who pass follow vision are added to this list automatically.",
     "daily-story-likes-enabled": "Enable daily story likes. When off, usernames are kept in story_likes.txt but the bot skips this job.",
+    "follow-after-story-like": "After liking someone’s story from a followers/likers list (story-ring mode), also follow that person on the same row. Skips if already following or follow limits are hit.",
     "post-reels": "How many reel videos are in your queue (post_media/). The bot posts up to posts-per-session from post_reel.yml each run, back-to-back, before other jobs. Locked to 0 for @615films and @yourlovefilms.",
     "blogger": "Open these profiles and interact (like, follow, etc.) based on your limits.",
-    "blogger-followers": "Open someone’s follower list and interact with those people — good for growing by following a competitor’s audience.",
+    "blogger-followers": "Open someone’s follower list and interact with those people — good for growing by following a competitor’s audience. With story-likes-only (follow% and like% at 0, stories% > 0), taps story rings in the list instead of opening profiles.",
     "blogger-following": "Open who someone follows and interact with those accounts.",
-    "blogger-post-likers": "Find people who liked that account’s recent posts and interact with them.",
+    "blogger-post-likers": "Find people who liked that account’s recent posts and interact with them. Leave empty to skip this job.",
     "hashtag-likers-top": "Find people who liked top posts for a hashtag.",
     "hashtag-likers-recent": "Find people who liked recent posts for a hashtag.",
     "hashtag-posts-top": "Browse top posts on a hashtag and interact from there.",
@@ -152,7 +154,7 @@ FILTER_HELP: dict[str, str] = {
 TELEGRAM_HELP: dict[str, str] = {
     "telegram-api-token": "Token from @BotFather on Telegram. Creates the bot that sends you reports.",
     "telegram-chat-id": "Your chat ID from @myidbot — where the bot sends session summaries.",
-    "telegram-status-commands": "Reply when you text status or update in Telegram. Requires the dashboard to be running.",
+    "telegram-status-commands": "Reply when you text status, update, or farm/screens (phone screenshot grid) in Telegram. Requires the dashboard to be running.",
     "telegram-ai-assistant": "Ask the bot anything in Telegram (e.g. 'how's progress?', 'why did it stop?') and an AI answers using the live status and logs. Reuses the account's OpenAI key (from follow_vision.yml or post_reel.yml). Requires the dashboard to be running.",
     "telegram-alerts": "Message you immediately when Instagram blocks an action or the bot hits a fatal error.",
 }
@@ -334,6 +336,15 @@ def enrich_fields(fields: list[dict], help_map: dict[str, str]) -> list[dict]:
             if list_key in help_map:
                 item["list_help"] = help_map[list_key]
             item["list_help"] = _append_help(item.get("list_help", ""), LINES_HINT)
+        companions = []
+        for companion in item.get("companion_bools") or []:
+            c = dict(companion)
+            ckey = c.get("key", "")
+            if "help" not in c and ckey in help_map:
+                c["help"] = help_map[ckey]
+            companions.append(c)
+        if companions:
+            item["companion_bools"] = companions
         format_hint = _field_format_hint(key, item)
         if format_hint:
             item["help"] = _append_help(item.get("help", ""), format_hint)

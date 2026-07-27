@@ -240,6 +240,13 @@ class CoreArguments(Plugin):
                 "action": "store_true",
             },
             {
+                "arg": "--unlock-pin",
+                "nargs": None,
+                "help": "lock-screen PIN digits only (no OK tap — waits for auto-unlock)",
+                "metavar": "1493",
+                "default": None,
+            },
+            {
                 "arg": "--debug",
                 "help": "enable debug logging",
                 "action": "store_true",
@@ -367,6 +374,11 @@ class CoreArguments(Plugin):
             {
                 "arg": "--end-session-after-daily-story-likes",
                 "help": "after the daily-story-likes job finishes its batch, end the session instead of stacking more jobs",
+                "action": "store_true",
+            },
+            {
+                "arg": "--follow-after-story-like",
+                "help": "after liking a story from blogger-post-likers / list story rings, also follow that account",
                 "action": "store_true",
             },
             {

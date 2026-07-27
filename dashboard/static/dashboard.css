@@ -3177,6 +3177,18 @@ body.brand-labely .phones-td-warmup {
   max-width: 14rem;
 }
 
+.inline-file-companions {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.75rem;
+}
+
+.inline-file-job-field.inline-file-job-disabled .inline-file-companions {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
 .inline-file-job-header {
   margin-bottom: 0.25rem;
 }

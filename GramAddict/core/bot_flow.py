@@ -49,6 +49,7 @@ from GramAddict.core.utils import (
     open_instagram,
     pre_post_script,
     print_telegram_reports,
+    random_sleep,
     restart_atx_agent,
     save_crash,
     set_time_delta,
@@ -187,11 +188,20 @@ def start_bot(**kwargs):
         if not device.get_info()["screenOn"]:
             device.press_power()
         if device.is_screen_locked():
-            device.unlock()
+            unlock_pin = getattr(configs.args, "unlock_pin", None)
+            device.unlock(pin=unlock_pin)
             if device.is_screen_locked():
-                logger.error(
-                    "Can't unlock your screen. There may be a passcode on it. If you would like your screen to be turned on and unlocked automatically, please remove the passcode."
-                )
+                if unlock_pin:
+                    logger.error(
+                        "Can't unlock your screen with the configured unlock-pin. "
+                        "Check the PIN, or unlock the phone manually once."
+                    )
+                else:
+                    logger.error(
+                        "Can't unlock your screen. There may be a passcode on it. "
+                        "Set unlock-pin in config.yml (digits only; no OK tap), "
+                        "or remove the passcode."
+                    )
                 stop_bot(device, sessions, session_state, was_sleeping=False)
 
         logger.info("Device screen ON and unlocked.")
@@ -253,18 +263,22 @@ def start_bot(**kwargs):
             tab_bar_view.navigateToHome()
         except Exception as e:
             logger.debug(f"Could not navigate to Home at session start: {e}")
-        try:
+
+        def _read_own_profile() -> bool:
+            """Navigate to own profile and fill session_state counts.
+
+            Returns True when username + posts/followers/following are readable
+            (and match the configured @handle when set).
+            """
             account_view.navigate_to_main_account()
             check_if_english(device)
             if configs.args.username is not None:
                 success = account_view.changeToUsername(configs.args.username)
                 if not success:
                     logger.error(
-                        f"Not able to change to {configs.args.username}, abort!"
+                        f"Not able to change to {configs.args.username}."
                     )
-                    save_crash(device)
-                    device.back()
-                    break
+                    return False
             account_view.refresh_account()
             (
                 session_state.my_username,
@@ -272,17 +286,70 @@ def start_bot(**kwargs):
                 session_state.my_followers_count,
                 session_state.my_following_count,
             ) = profile_view.getProfileInfo()
-        except Exception as e:
-            logger.error(f"Exception: {e}")
-            save_crash(device)
-            break
+            if (
+                session_state.my_username is None
+                or session_state.my_posts_count is None
+                or session_state.my_followers_count is None
+                or session_state.my_following_count is None
+            ):
+                return False
+            if configs.args.username is not None:
+                want = str(configs.args.username).strip().lstrip("@").casefold()
+                got = str(session_state.my_username).strip().lstrip("@").casefold()
+                if want and got != want:
+                    logger.warning(
+                        f"Profile username mismatch: expected @{want}, got "
+                        f"'{session_state.my_username}'."
+                    )
+                    return False
+            return True
 
-        if (
-            session_state.my_username is None
-            or session_state.my_posts_count is None
-            or session_state.my_followers_count is None
-            or session_state.my_following_count is None
-        ):
+        # Profile header often fails to load (gray shell / transient UI). Close
+        # Instagram and reopen up to 3 times before treating it as a real stop.
+        profile_ok = False
+        profile_attempts = 3
+        for attempt in range(1, profile_attempts + 1):
+            try:
+                if _read_own_profile():
+                    profile_ok = True
+                    break
+            except Exception as e:
+                logger.error(f"Exception reading own profile: {e}")
+
+            logger.warning(
+                f"Could not read own profile "
+                f"(username={session_state.my_username}, "
+                f"posts={session_state.my_posts_count}, "
+                f"followers={session_state.my_followers_count}, "
+                f"following={session_state.my_following_count}) — "
+                f"attempt {attempt}/{profile_attempts}.",
+                extra={"color": f"{Fore.YELLOW}"},
+            )
+            if attempt >= profile_attempts:
+                break
+            logger.info(
+                "Closing Instagram and reopening to retry profile load…",
+                extra={"color": f"{Fore.CYAN}"},
+            )
+            try:
+                save_crash(device)
+            except Exception:
+                pass
+            try:
+                close_instagram(device)
+            except Exception as e:
+                logger.debug(f"close_instagram during profile retry failed: {e}")
+            random_sleep(3, 6, modulable=False, minimum=2)
+            if not open_instagram(device):
+                logger.error("Could not reopen Instagram for profile retry.")
+                continue
+            try:
+                UniversalActions.close_keyboard(device)
+                tab_bar_view.navigateToHome()
+            except Exception as e:
+                logger.debug(f"Home nav after reopen failed: {e}")
+
+        if not profile_ok:
             logger.critical(
                 "Could not get one of the following from your profile: username, # of posts, # of followers, # of followings. This is typically due to a soft-ban. Review the crash screenshot to see if this is the case."
             )
@@ -321,7 +388,11 @@ def start_bot(**kwargs):
         if configs.args.shuffle_jobs:
             jobs_list = random.sample(configs.enabled, len(configs.enabled))
         else:
-            jobs_list = configs.enabled
+            jobs_list = list(configs.enabled)
+
+        # Always run reel posting first when enabled (queue posts at session start).
+        if "post-reels" in jobs_list:
+            jobs_list = ["post-reels"] + [j for j in jobs_list if j != "post-reels"]
 
         if "analytics" in jobs_list:
             jobs_list.remove("analytics")

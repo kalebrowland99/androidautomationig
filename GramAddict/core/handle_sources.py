@@ -9,7 +9,9 @@ from colorama import Fore
 
 from GramAddict.core.device_facade import DeviceFacade, Direction, Timeout
 from GramAddict.core.interaction import (
+    _follow,
     find_list_row_story_ring,
+    follow_from_list_row,
     like_all_profile_stories,
     like_stories_from_list_row,
     list_row_display_name,
@@ -438,12 +440,15 @@ def interact_list_story_ring(
     )
     if watched <= 0:
         return None
+    followed = False
+    if getattr(self.args, "follow_after_story_like", False):
+        followed = follow_from_list_row(device, row, username, session_state)
     storage.add_interacted_user(
         username,
         session_id=session_state.id,
         job_name=current_job,
         target=target,
-        followed=False,
+        followed=followed,
         is_requested=False,
         scraped=False,
         liked=0,
@@ -465,7 +470,7 @@ def interact_list_story_ring(
             logger.debug("Pool story-liked-today mark failed: %s", exc)
     if not on_interaction(
         succeed=True,
-        followed=False,
+        followed=followed,
         scraped=False,
     ):
         return False
@@ -889,6 +894,38 @@ def handle_daily_story_likes_from_file(self, device, parameter_passed, storage):
                         )
                     except Exception as exc:
                         logger.debug("Pool story-liked-today mark failed: %s", exc)
+                if getattr(self.args, "follow_after_story_like", False):
+                    # Always attempt when the tick is on (ignore follow-percentage).
+                    followed = _follow(
+                        device, username, 100, self.args, self.session_state, 0
+                    )
+                    if followed:
+                        storage.add_interacted_user(
+                            username,
+                            session_id=self.session_state.id,
+                            job_name="daily-story-likes",
+                            target=username,
+                            followed=True,
+                            is_requested=False,
+                            scraped=False,
+                            liked=0,
+                            watched=liked,
+                            commented=0,
+                            pm_sent=False,
+                        )
+                        self.session_state.add_interaction(
+                            "daily-story-likes", True, True, False
+                        )
+                        append_story_likes_log(
+                            storage.my_username,
+                            f"@{username}: followed after story like.",
+                        )
+                    else:
+                        append_story_likes_log(
+                            storage.my_username,
+                            f"@{username}: follow after story like skipped "
+                            f"(already following, limit, or button missing).",
+                        )
             else:
                 append_story_likes_log(
                     storage.my_username,
@@ -1343,12 +1380,15 @@ def handle_posts(
                 "Scraping and interacting with own feed doesn't make any sense. Skip."
             )
             return
-        nav_to_feed(device)
         count_feed_limit = get_value(
             self.args.feed,
             "Feed interact count: {}",
             10,
         )
+        if count_feed_limit <= 0:
+            logger.info("Feed interact count is 0 — skip feed job.")
+            return
+        nav_to_feed(device)
         count = 0
         PostsViewList(device)._refresh_feed()
     elif not nav_to_hashtag_or_place(device, target, current_job):

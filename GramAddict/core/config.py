@@ -1,3 +1,4 @@
+import io
 import logging
 import os
 import sys
@@ -10,6 +11,40 @@ import yaml
 from GramAddict.core.plugin_loader import PluginLoader
 
 logger = logging.getLogger(__name__)
+
+
+def _open_config_without_empty_lists(filename: str):
+    """Open a YAML config, dropping empty lists.
+
+    Keys like ``blogger-post-likers: []`` become ``--blogger-post-likers`` with no
+    values; argparse ``nargs='+'`` then fails with "expected at least one argument".
+    Omitting the key means the job is simply disabled.
+    """
+    with open(filename, encoding="utf-8") as handle:
+        raw = handle.read()
+    try:
+        data = yaml.safe_load(raw)
+    except Exception:
+        return open(filename, "r+", encoding="utf-8")
+    if not isinstance(data, dict):
+        return open(filename, "r+", encoding="utf-8")
+    cleaned = {
+        key: value
+        for key, value in data.items()
+        if not (isinstance(value, list) and len(value) == 0)
+    }
+    if cleaned == data:
+        return open(filename, "r+", encoding="utf-8")
+    text = yaml.dump(
+        cleaned,
+        default_flow_style=None,
+        sort_keys=False,
+        allow_unicode=True,
+        width=10**9,
+    )
+    buf = io.StringIO(text)
+    buf.name = filename  # configargparse expects stream.name
+    return buf
 
 
 class Config:
@@ -91,9 +126,7 @@ class Config:
 
         # Configure ArgParse
         self.parser = configargparse.ArgumentParser(
-            config_file_open_func=lambda filename: open(
-                filename, "r+", encoding="utf-8"
-            ),
+            config_file_open_func=_open_config_without_empty_lists,
             description="GramAddict Instagram Bot",
         )
         self.parser.add_argument(

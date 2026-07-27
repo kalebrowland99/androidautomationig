@@ -60,6 +60,7 @@ def list_brand_pools() -> list[dict[str, Any]]:
 def set_pool_posting(pool_id: str, enabled: bool) -> dict[str, Any]:
     """Enable/disable the post-reels job for every account in a pool."""
     meta = set_pool_posting_enabled(pool_id, enabled)
+    synced = sync_pool_post_reels_queue(pool_id)
     return {
         "id": meta["id"],
         "name": meta["name"],
@@ -69,6 +70,7 @@ def set_pool_posting(pool_id: str, enabled: bool) -> dict[str, Any]:
             for account_id in meta["accounts"]
         ],
         "interacted_count": len(load_interacted_users(meta["id"])),
+        "post_reels_synced": synced,
     }
 
 
@@ -127,6 +129,96 @@ def _pool_member_ids(pool_id: str) -> list[str]:
     if not pool_id:
         raise ValueError("Unknown brand pool")
     return list(load_pool_meta(pool_id)["accounts"])
+
+
+def _media_count_for_account(account_id: str) -> int:
+    from dashboard.post_reel_config import list_post_media_files
+
+    try:
+        return len(list_post_media_files(account_id))
+    except Exception:
+        return 0
+
+
+def _set_account_post_reels(account_id: str, count: int) -> str:
+    """Write post-reels in config.yml. Locked accounts are always forced to 0."""
+    from GramAddict.core.account_safety import apply_autopost_lock, is_autopost_locked
+    from dashboard.gramaddict_config import (
+        ACCOUNTS_DIR,
+        _load_yaml,
+        _save_account_config_yaml,
+    )
+
+    config_path = ACCOUNTS_DIR / account_id / "config.yml"
+    if not config_path.is_file():
+        raise FileNotFoundError(f"Account not found: {account_id}")
+    data = _load_yaml(config_path)
+    username = str(data.get("username") or account_id)
+    if is_autopost_locked(account_id, username):
+        value = "0"
+    else:
+        value = str(max(0, int(count)))
+    if str(data.get("post-reels") or "").strip() == value:
+        data = apply_autopost_lock(account_id, data)
+        if str(data.get("post-reels") or "").strip() == value:
+            return value
+    data["post-reels"] = value
+    data = apply_autopost_lock(account_id, data)
+    _save_account_config_yaml(config_path, data)
+    return str(data.get("post-reels") or "0")
+
+
+def sync_pool_post_reels_queue(pool_id: str) -> dict[str, Any]:
+    """Set each member's ``post-reels`` to their current video queue size.
+
+    Pool upload/delete should call this so operators never have to edit
+    post-reels account-by-account. Autopost-locked accounts stay at 0.
+    When pool posting is disabled, every member is set to 0.
+    """
+    from GramAddict.core.account_safety import is_autopost_locked
+
+    pool_id = normalize_pool_id(pool_id)
+    if not pool_id:
+        raise ValueError("Unknown brand pool")
+    meta = load_pool_meta(pool_id)
+    posting_on = bool(meta.get("posting_enabled", True))
+    updated: list[dict[str, Any]] = []
+    locked: list[str] = []
+    errors: list[dict[str, str]] = []
+    for account_id in meta["accounts"]:
+        username = _account_username(account_id)
+        try:
+            if is_autopost_locked(account_id, username):
+                value = _set_account_post_reels(account_id, 0)
+                locked.append(account_id)
+                updated.append(
+                    {"account_id": account_id, "post_reels": value, "media_count": 0}
+                )
+                continue
+            media_count = _media_count_for_account(account_id) if posting_on else 0
+            value = _set_account_post_reels(account_id, media_count)
+            updated.append(
+                {
+                    "account_id": account_id,
+                    "post_reels": value,
+                    "media_count": media_count,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - report per-account failures
+            errors.append({"account_id": account_id, "error": str(exc)})
+    queue_sizes = [
+        int(row["post_reels"])
+        for row in updated
+        if row["account_id"] not in locked
+    ]
+    return {
+        "pool_id": pool_id,
+        "posting_enabled": posting_on,
+        "queue": max(queue_sizes) if queue_sizes else 0,
+        "updated": updated,
+        "locked": locked,
+        "errors": errors,
+    }
 
 
 def list_pool_media(pool_id: str) -> dict[str, Any]:
@@ -194,6 +286,7 @@ def upload_media_to_pool(pool_id: str, filename: str, data: bytes) -> dict[str, 
             copied.append(account_id)
         except Exception as exc:  # noqa: BLE001 - report per-account failures
             errors.append({"account_id": account_id, "error": str(exc)})
+    synced = sync_pool_post_reels_queue(pool_id)
     return {
         "pool_id": normalize_pool_id(pool_id),
         "filename": safe,
@@ -202,6 +295,7 @@ def upload_media_to_pool(pool_id: str, filename: str, data: bytes) -> dict[str, 
         "skipped_locked": skipped_locked,
         "skipped_existing": skipped_existing,
         "errors": errors,
+        "post_reels_synced": synced,
     }
 
 
@@ -228,6 +322,7 @@ def delete_media_from_pool(pool_id: str, filename: str) -> dict[str, Any]:
             deleted.append(account_id)
         except Exception as exc:  # noqa: BLE001 - report per-account failures
             errors.append({"account_id": account_id, "error": str(exc)})
+    synced = sync_pool_post_reels_queue(pool_id)
     return {
         "pool_id": normalize_pool_id(pool_id),
         "filename": safe,
@@ -235,6 +330,7 @@ def delete_media_from_pool(pool_id: str, filename: str) -> dict[str, Any]:
         "deleted": deleted,
         "missing": missing,
         "errors": errors,
+        "post_reels_synced": synced,
     }
 
 

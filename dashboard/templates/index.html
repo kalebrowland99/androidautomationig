@@ -48,7 +48,7 @@
             --brand: #6366f1;
         }
     </style>
-    <link rel="stylesheet" href="/static/dashboard.css?v=52">
+    <link rel="stylesheet" href="/static/dashboard.css?v=53">
 </head>
 <body class="min-h-screen bg-white text-foreground antialiased brand-gramaddict">
     <div id="page-banner"></div>
@@ -122,6 +122,8 @@
                             class="btn-ghost btn-sm btn-kill">Stop selected</button>
                         <button type="button" id="btn-refresh-all" onclick="refreshDevices()"
                             class="btn-ghost btn-sm">Refresh devices</button>
+                        <button type="button" id="btn-mass-mirror" onclick="window.open('/mirror','_blank')"
+                            class="btn-ghost btn-sm" title="View-only grid of Farm-checked phones in a new tab">Mass mirror</button>
                     </div>
                 </div>
 
@@ -679,6 +681,6 @@
     </div>
 
     <script>window.__DEBUG_GROUP_COUNTS__ = __DEBUG_BOOTSTRAP__;</script>
-    <script src="/static/dashboard.js?v=62"></script>
+    <script src="/static/dashboard.js?v=70"></script>
 </body>
 </html>

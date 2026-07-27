@@ -44,6 +44,28 @@ def telegram_bot_send_text(bot_api_token, bot_chat_ID, text, parse_mode="markdow
         return None
 
 
+def telegram_bot_send_photo(
+    bot_api_token,
+    bot_chat_ID,
+    photo_bytes: bytes,
+    caption: Optional[str] = None,
+    parse_mode: Optional[str] = "markdown",
+):
+    """Send a JPEG (or other image bytes) via Telegram sendPhoto."""
+    try:
+        url = f"https://api.telegram.org/bot{bot_api_token}/sendPhoto"
+        data = {"chat_id": bot_chat_ID}
+        if caption:
+            data["caption"] = caption
+            if parse_mode:
+                data["parse_mode"] = parse_mode
+        files = {"photo": ("photo.jpg", photo_bytes, "image/jpeg")}
+        return requests.post(url, data=data, files=files, timeout=60).json()
+    except Exception as e:
+        logger.error(f"Error sending Telegram photo: {e}")
+        return None
+
+
 def telegram_alerts_enabled(telegram_config: dict) -> bool:
     return telegram_config.get("telegram-alerts", True) is not False
 
@@ -295,6 +317,10 @@ def _fmt_today_bits(data: dict, goals: Optional[dict] = None) -> list[str]:
         if not n and key == "total_story_likes":
             n = int(data.get("total_watched", 0) or 0)
         goal = _as_int(goals.get(goal_key)) if goal_key else None
+        # Always surface Followed when a follows goal is configured (story-like farms).
+        if label == "Followed" and (goal or n):
+            bits.append(f"{label} {n}/{goal}" if goal else f"{label} {n}")
+            continue
         if goal:
             bits.append(f"{label} {n}/{goal}")
         elif n:

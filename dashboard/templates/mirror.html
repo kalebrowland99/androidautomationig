@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mass Mirror — GramAddict</title>
+  <style>
+    :root {
+      --bg: #12141a;
+      --panel: #1a1d26;
+      --border: #2a2f3a;
+      --text: #e8eaed;
+      --muted: #9aa0a6;
+      --accent: #7aa2ff;
+      --danger: #f07178;
+      --ok: #7fd99a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .bar {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem 1rem;
+      align-items: center;
+      padding: 0.75rem 1rem;
+      background: rgba(18, 20, 26, 0.94);
+      border-bottom: 1px solid var(--border);
+      backdrop-filter: blur(8px);
+    }
+    .bar h1 {
+      margin: 0;
+      font-size: 1rem;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+    }
+    .bar .meta {
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+    .bar-actions {
+      margin-left: auto;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+    }
+    label.quality {
+      display: flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.85rem;
+      color: var(--muted);
+    }
+    select, button, a.btn {
+      font: inherit;
+      font-size: 0.85rem;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      padding: 0.35rem 0.7rem;
+      cursor: pointer;
+      text-decoration: none;
+    }
+    select:focus, button:focus, a.btn:focus {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+    button.primary {
+      border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+      background: color-mix(in srgb, var(--accent) 18%, var(--panel));
+    }
+    button.danger {
+      border-color: color-mix(in srgb, var(--danger) 45%, var(--border));
+      color: #ffc9cc;
+    }
+    button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+    .hint {
+      width: 100%;
+      margin: 0;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    .grid {
+      display: grid;
+      gap: 0.75rem;
+      padding: 0.85rem;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    }
+    .tile {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      min-height: 220px;
+    }
+    .tile-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.5rem;
+      align-items: baseline;
+      padding: 0.45rem 0.55rem;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.78rem;
+    }
+    .tile-head .handle {
+      font-weight: 600;
+      color: var(--text);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .tile-head .serial {
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+      flex-shrink: 0;
+    }
+    .tile-body {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #0b0c10;
+      position: relative;
+      min-height: 180px;
+      cursor: pointer;
+    }
+    .tile-body img {
+      max-width: 100%;
+      max-height: 360px;
+      width: auto;
+      height: auto;
+      display: block;
+      object-fit: contain;
+    }
+    .tile-body .placeholder {
+      color: var(--muted);
+      font-size: 0.8rem;
+      padding: 1rem;
+      text-align: center;
+    }
+    .tile-foot {
+      padding: 0.35rem 0.55rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.72rem;
+      color: var(--muted);
+      display: flex;
+      justify-content: space-between;
+      gap: 0.5rem;
+    }
+    .tile-foot .live { color: var(--ok); }
+    .tile-foot .stopped { color: var(--muted); }
+    .tile-foot .err { color: var(--danger); }
+    .empty {
+      margin: 3rem auto;
+      max-width: 28rem;
+      text-align: center;
+      color: var(--muted);
+      line-height: 1.5;
+    }
+    .error {
+      color: var(--danger);
+      padding: 1rem;
+      text-align: center;
+    }
+  </style>
+</head>
+<body>
+  <header class="bar">
+    <h1>Mass Mirror</h1>
+    <span class="meta" id="status-meta">Loading…</span>
+    <div class="bar-actions">
+      <label class="quality">
+        Quality
+        <select id="quality-select" title="Applies to all tiles">
+          <option value="low" selected>Low (320 · ~1 fps)</option>
+          <option value="med">Med (480 · ~0.5 fps)</option>
+          <option value="high">High (720 · slower)</option>
+        </select>
+      </label>
+      <button type="button" class="primary" id="btn-start">Start</button>
+      <button type="button" class="danger" id="btn-stop" disabled>Stop</button>
+      <button type="button" id="btn-wake">Wake all</button>
+      <button type="button" id="btn-refresh">Refresh targets</button>
+      <a class="btn" href="/" title="Back to Farm">Farm</a>
+    </div>
+    <p class="hint">View-only snapshots (not live MJPEG — browsers only allow ~6 streams). Wake all, then wait a few seconds for tiles to fill. Click a tile for scrcpy.</p>
+  </header>
+
+  <div id="error" class="error" hidden></div>
+  <div id="empty" class="empty" hidden>No connected phones. Check Farm selection or plug devices in, then Refresh targets.</div>
+  <div id="grid" class="grid"></div>
+
+  <script>
+    const PRESETS = {
+      low: { max_size: 320, quality: 40, interval_ms: 900 },
+      med: { max_size: 480, quality: 55, interval_ms: 1400 },
+      high: { max_size: 720, quality: 70, interval_ms: 2200 },
+    };
+    // Browsers ~6 connections/host; keep under that so every phone gets frames.
+    const MAX_IN_FLIGHT = 4;
+
+    let targets = [];
+    let streaming = false;
+    let sourceLabel = "";
+    let pollTimer = null;
+    let nextIndex = 0;
+    let inFlight = 0;
+    let objectUrls = new Map(); // serial -> blob url
+
+    const $ = (id) => document.getElementById(id);
+    const qualitySelect = $("quality-select");
+    const grid = $("grid");
+    const statusMeta = $("status-meta");
+    const emptyEl = $("empty");
+    const errorEl = $("error");
+    const btnStart = $("btn-start");
+    const btnStop = $("btn-stop");
+
+    function currentParams() {
+      return PRESETS[qualitySelect.value] || PRESETS.low;
+    }
+
+    function snapshotUrl(serial) {
+      const p = currentParams();
+      const q = new URLSearchParams({
+        preset: qualitySelect.value,
+        max_size: String(p.max_size),
+        quality: String(p.quality),
+        t: String(Date.now()),
+      });
+      return `/api/preview/${encodeURIComponent(serial)}.jpg?${q}`;
+    }
+
+    function tileEls() {
+      return [...grid.querySelectorAll(".tile")];
+    }
+
+    function setTileState(tile, kind, text) {
+      const state = tile.querySelector(".stream-state");
+      if (!state) return;
+      state.textContent = text;
+      state.className = `stream-state ${kind}`;
+    }
+
+    function revokeUrl(serial) {
+      const prev = objectUrls.get(serial);
+      if (prev) {
+        URL.revokeObjectURL(prev);
+        objectUrls.delete(serial);
+      }
+    }
+
+    async function fetchOneSnapshot(tile) {
+      const serial = tile.dataset.serial;
+      const img = tile.querySelector("img");
+      const ph = tile.querySelector(".placeholder");
+      if (!serial || !img) return;
+      try {
+        const res = await fetch(snapshotUrl(serial), { cache: "no-store" });
+        if (!res.ok) {
+          const detail = await res.text().catch(() => "");
+          throw new Error(detail || `HTTP ${res.status}`);
+        }
+        const blob = await res.blob();
+        if (!blob || blob.size < 200) throw new Error("empty frame");
+        const url = URL.createObjectURL(blob);
+        revokeUrl(serial);
+        objectUrls.set(serial, url);
+        img.src = url;
+        img.hidden = false;
+        if (ph) ph.hidden = true;
+        setTileState(tile, "live", "Live");
+      } catch (err) {
+        setTileState(tile, "err", "Retry");
+        if (ph && img.hidden) {
+          ph.hidden = false;
+          ph.textContent = "Waiting…";
+        }
+      }
+    }
+
+    function pumpSnapshots() {
+      if (!streaming) return;
+      const tiles = tileEls();
+      if (!tiles.length) return;
+      while (inFlight < MAX_IN_FLIGHT && streaming) {
+        if (nextIndex >= tiles.length) nextIndex = 0;
+        const tile = tiles[nextIndex++];
+        inFlight += 1;
+        fetchOneSnapshot(tile).finally(() => {
+          inFlight -= 1;
+          if (streaming) {
+            // Immediately fill free slots; interval only paces full rounds.
+            setTimeout(pumpSnapshots, 40);
+          }
+        });
+        // One assignment per loop iteration; pump again after finally.
+        break;
+      }
+    }
+
+    function startPolling() {
+      stopPolling(false);
+      streaming = true;
+      btnStart.disabled = true;
+      btnStop.disabled = false;
+      nextIndex = 0;
+      updateMeta();
+      for (const tile of tileEls()) {
+        setTileState(tile, "live", "Starting…");
+        const ph = tile.querySelector(".placeholder");
+        if (ph) {
+          ph.hidden = false;
+          ph.textContent = "Waiting…";
+        }
+      }
+      // Kick several workers so the first round fills quickly.
+      for (let i = 0; i < MAX_IN_FLIGHT; i++) {
+        setTimeout(pumpSnapshots, i * 60);
+      }
+      const tick = () => {
+        if (!streaming) return;
+        pumpSnapshots();
+        pollTimer = setTimeout(tick, currentParams().interval_ms);
+      };
+      pollTimer = setTimeout(tick, currentParams().interval_ms);
+    }
+
+    function stopPolling(updateUi = true) {
+      streaming = false;
+      if (pollTimer) {
+        clearTimeout(pollTimer);
+        pollTimer = null;
+      }
+      if (!updateUi) return;
+      btnStart.disabled = false;
+      btnStop.disabled = true;
+      for (const tile of tileEls()) {
+        const img = tile.querySelector("img");
+        const ph = tile.querySelector(".placeholder");
+        if (img) {
+          img.removeAttribute("src");
+          img.hidden = true;
+        }
+        revokeUrl(tile.dataset.serial);
+        if (ph) {
+          ph.hidden = false;
+          ph.textContent = "Stopped";
+        }
+        setTileState(tile, "stopped", "Stopped");
+      }
+      updateMeta();
+    }
+
+    function updateMeta() {
+      const p = currentParams();
+      const mode = streaming ? "streaming" : "idle";
+      const src = sourceLabel === "farm_selection" ? "Farm-checked" : "All connected";
+      const fpsApprox = (MAX_IN_FLIGHT / Math.max(1, targets.length) * (1000 / p.interval_ms));
+      statusMeta.textContent = `${targets.length} phone${targets.length === 1 ? "" : "s"} · ${src} · ${mode} · ${p.max_size}px · ~${fpsApprox.toFixed(2)} fps/phone`;
+    }
+
+    function renderGrid() {
+      const wasStreaming = streaming;
+      stopPolling(false);
+      for (const serial of [...objectUrls.keys()]) revokeUrl(serial);
+      grid.innerHTML = "";
+      emptyEl.hidden = targets.length > 0;
+      for (const t of targets) {
+        const handle = t.username ? `@${t.username}` : "(unlinked)";
+        const tile = document.createElement("article");
+        tile.className = "tile";
+        tile.dataset.serial = t.serial;
+        tile.innerHTML = `
+          <div class="tile-head">
+            <span class="handle" title="${escapeHtml(handle)}">${escapeHtml(handle)}</span>
+            <span class="serial" title="${escapeHtml(t.serial)}">${escapeHtml(t.short_serial || t.serial)}</span>
+          </div>
+          <div class="tile-body" title="Click to open scrcpy">
+            <span class="placeholder">Ready</span>
+            <img alt="" hidden>
+          </div>
+          <div class="tile-foot">
+            <span class="stream-state stopped">Stopped</span>
+            <span>scrcpy on click</span>
+          </div>
+        `;
+        tile.querySelector(".tile-body").addEventListener("click", () => openScrcpy(t.serial));
+        grid.appendChild(tile);
+      }
+      updateMeta();
+      if (wasStreaming) startPolling();
+    }
+
+    function escapeHtml(s) {
+      return String(s)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    async function loadTargets() {
+      errorEl.hidden = true;
+      try {
+        const res = await fetch("/api/preview/targets");
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || "Failed to load targets");
+        targets = data.targets || [];
+        sourceLabel = data.source || "";
+        renderGrid();
+      } catch (err) {
+        errorEl.hidden = false;
+        errorEl.textContent = err.message || String(err);
+        targets = [];
+        renderGrid();
+      }
+    }
+
+    async function openScrcpy(serial) {
+      const now = Date.now();
+      const force =
+        openScrcpy._lastSerial === serial && now - (openScrcpy._lastAt || 0) < 4000;
+      openScrcpy._lastSerial = serial;
+      openScrcpy._lastAt = now;
+      try {
+        const qs = force ? "?force=1" : "";
+        const res = await fetch(
+          `/api/devices/${encodeURIComponent(serial)}/mirror${qs}`,
+          { method: "POST" }
+        );
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "Mirror failed");
+        if (data.status === "focused" || data.status === "already_running") {
+          statusMeta.textContent =
+            "scrcpy focused — click again within 4s to relaunch if missing";
+        } else {
+          statusMeta.textContent = force ? "scrcpy relaunched" : "scrcpy opened";
+        }
+      } catch (err) {
+        errorEl.hidden = false;
+        errorEl.textContent = `scrcpy: ${err.message || err}`;
+      }
+    }
+
+    async function wakeAll() {
+      errorEl.hidden = true;
+      const btn = $("btn-wake");
+      btn.disabled = true;
+      try {
+        const res = await fetch("/api/preview/wake-all", { method: "POST" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.detail || "Wake failed");
+        statusMeta.textContent = `Woke ${data.ok || 0}/${data.count || 0} phones — refreshing…`;
+        nextIndex = 0;
+        if (!streaming) startPolling();
+        else {
+          // Prioritize a full fresh round after wake.
+          for (let i = 0; i < MAX_IN_FLIGHT; i++) {
+            setTimeout(pumpSnapshots, i * 50);
+          }
+        }
+      } catch (err) {
+        errorEl.hidden = false;
+        errorEl.textContent = err.message || String(err);
+      } finally {
+        btn.disabled = false;
+        setTimeout(updateMeta, 1500);
+      }
+    }
+
+    btnStart.addEventListener("click", async () => {
+      try {
+        await fetch("/api/preview/wake-all", { method: "POST" });
+      } catch (_) {}
+      startPolling();
+    });
+    btnStop.addEventListener("click", () => stopPolling(true));
+    $("btn-wake").addEventListener("click", () => wakeAll());
+    $("btn-refresh").addEventListener("click", () => loadTargets());
+    qualitySelect.addEventListener("change", () => {
+      if (streaming) {
+        stopPolling(false);
+        startPolling();
+      } else updateMeta();
+    });
+
+    window.addEventListener("beforeunload", () => {
+      stopPolling(false);
+      for (const serial of [...objectUrls.keys()]) revokeUrl(serial);
+    });
+
+    loadTargets().then(async () => {
+      if (!targets.length) return;
+      try {
+        await fetch("/api/preview/wake-all", { method: "POST" });
+      } catch (_) {}
+      startPolling();
+    });
+  </script>
+</body>
+</html>

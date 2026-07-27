@@ -1183,6 +1183,222 @@ def _follow(device, username, follow_percentage, args, session_state, swipe_amou
     return False
 
 
+def follow_from_list_row(device, row, username, session_state) -> bool:
+    """After a list story like: follow *that* username's row Follow button.
+
+    Do not trust the pre-story ``row`` handle (it goes stale when the story
+    viewer closes). Always:
+      1. re-find the username text on the followers/likers list
+      2. find the Follow button on that same row (right side)
+      3. tap Follow and confirm Following/Requested
+    """
+    if session_state.check_limit(
+        limit_type=session_state.Limit.FOLLOWS, output=False
+    ):
+        logger.info("Reached total follows limit, not following.")
+        return False
+
+    want = (username or "").strip().lstrip("@")
+    if not want:
+        return False
+
+    # Let the list settle after closing the story viewer.
+    random_sleep(0.45, 0.8, modulable=False, log=False, minimum=0.25)
+
+    follow_re = case_insensitive_re(r"^Follow(\s*Back)?$")
+    following_re = case_insensitive_re(r"^Following$|^Requested$")
+    # After a successful follow, some rows swap Follow → Message.
+    followed_alt_re = case_insensitive_re(r"^Message$|^Following$|^Requested$")
+    rid = _story_like_resource_ids()
+    name_rid = (
+        f"{getattr(rid, 'FOLLOW_LIST_USERNAME', '')}|"
+        f"{getattr(rid, 'ROW_USER_PRIMARY_NAME', '')}"
+    ).strip("|")
+
+    def _username_view():
+        """Fresh username label for this account on the visible list."""
+        if name_rid:
+            view = device.find(
+                resourceIdMatches=case_insensitive_re(name_rid),
+                textMatches=case_insensitive_re(rf"^{re.escape(want)}$"),
+            )
+            if view.exists(Timeout.SHORT):
+                return view
+        view = device.find(
+            textMatches=case_insensitive_re(rf"^{re.escape(want)}$"),
+        )
+        if view.exists(Timeout.SHORT):
+            return view
+        return None
+
+    def _row_band(name_bounds: dict) -> dict:
+        """Expand username text into a full list-row vertical band.
+
+        IG often stacks display-name above @username while Follow aligns with
+        the whole row — the tight username bounds miss the button.
+        """
+        cy = (name_bounds["top"] + name_bounds["bottom"]) / 2.0
+        # Typical follower/liker row is ~120–160px tall on these phones.
+        half = max(70, (name_bounds["bottom"] - name_bounds["top"]) * 3)
+        return {
+            "left": name_bounds["left"],
+            "right": name_bounds["right"],
+            "top": int(cy - half),
+            "bottom": int(cy + half),
+        }
+
+    def _iter_action_candidates(text_re: str):
+        """Yield (view, bounds) for Follow/Following-like controls."""
+        queries = (
+            dict(clickable=True, textMatches=text_re),
+            dict(textMatches=text_re),
+            dict(clickable=True, descriptionMatches=text_re),
+            dict(descriptionMatches=text_re),
+        )
+        seen = set()
+        for kwargs in queries:
+            try:
+                matches = device.deviceV2(**kwargs)
+                count = matches.count
+            except Exception:
+                continue
+            for i in range(count):
+                btn = matches[i]
+                try:
+                    b = btn.info["bounds"]
+                    key = (b["left"], b["top"], b["right"], b["bottom"])
+                except Exception:
+                    continue
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield DeviceFacade.View(view=btn, device=device.deviceV2), b
+
+    def _button_on_row(name_bounds: dict, text_re: str):
+        """Pick the control on this row, preferring the right-hand Follow."""
+        band = _row_band(name_bounds)
+        name_cy = (name_bounds["top"] + name_bounds["bottom"]) / 2.0
+        name_right = name_bounds["right"]
+        best = None
+        best_score = None
+        for btn, b in _iter_action_candidates(text_re):
+            if not _bounds_overlap_y(band, b):
+                continue
+            btn_cy = (b["top"] + b["bottom"]) / 2.0
+            # Prefer buttons to the right of the name / on the right half.
+            right_bonus = 0.0
+            if b["left"] >= name_right - 20:
+                right_bonus = -200.0
+            elif b["left"] > name_bounds["left"]:
+                right_bonus = -50.0
+            score = abs(btn_cy - name_cy) + right_bonus
+            if best_score is None or score < best_score:
+                best_score = score
+                best = btn
+        return best
+
+    def _button_right_of_name(name_view, text_re: str):
+        try:
+            btn = name_view.right(clickable=True, textMatches=text_re)
+            if btn is not None and btn.exists(Timeout.ZERO):
+                return btn
+        except Exception:
+            pass
+        try:
+            btn = name_view.right(textMatches=text_re)
+            if btn is not None and btn.exists(Timeout.ZERO):
+                return btn
+        except Exception:
+            pass
+        try:
+            btn = name_view.sibling(clickable=True, textMatches=text_re)
+            if btn is not None and btn.exists(Timeout.ZERO):
+                return btn
+        except Exception:
+            pass
+        return None
+
+    def _row_action_button(name_view, text_re: str):
+        btn = _button_right_of_name(name_view, text_re)
+        if btn is not None:
+            return btn
+        try:
+            name_bounds = name_view.get_bounds()
+        except DeviceFacade.JsonRpcError:
+            return None
+        return _button_on_row(name_bounds, text_re)
+
+    def _confirm_followed(name_view) -> bool:
+        """True when the row no longer offers Follow after our tap."""
+        if name_view is None:
+            return True
+        if _row_action_button(name_view, following_re) is not None:
+            return True
+        if _row_action_button(name_view, followed_alt_re) is not None:
+            # Message / Following / Requested on the row.
+            if _row_action_button(name_view, follow_re) is None:
+                return True
+        # Follow control vanished after the tap → treat as success.
+        # (IG sometimes doesn't expose a readable "Following" label.)
+        return _row_action_button(name_view, follow_re) is None
+
+    for n in range(3):
+        name_view = _username_view()
+        if name_view is None:
+            logger.info(
+                f"@{username}: username not visible on list after story — skip follow.",
+                extra={"color": f"{Fore.GREEN}"},
+            )
+            return False
+
+        if _row_action_button(name_view, following_re) is not None:
+            if n == 0:
+                logger.info(
+                    f"You already follow @{username}.",
+                    extra={"color": f"{Fore.GREEN}"},
+                )
+                return False
+            logger.info(f"Followed @{username}", extra={"color": Fore.GREEN})
+            UniversalActions(device).detect_block(device)
+            return True
+
+        follow_button = _row_action_button(name_view, follow_re)
+        if follow_button is None:
+            logger.info(
+                f"@{username}: no Follow button on that username's row — skip follow.",
+                extra={"color": f"{Fore.GREEN}"},
+            )
+            return False
+
+        logger.info(
+            f"@{username}: tapping Follow on list row.",
+            extra={"color": f"{Fore.YELLOW}"},
+        )
+        try:
+            follow_button.click()
+        except DeviceFacade.JsonRpcError as exc:
+            logger.debug("@%s: Follow click failed: %s", username, exc)
+        random_sleep(0.7, 1.2, modulable=False, log=False, minimum=0.45)
+
+        name_view = _username_view()
+        if _confirm_followed(name_view):
+            logger.info(f"Followed @{username}", extra={"color": Fore.GREEN})
+            UniversalActions(device).detect_block(device)
+            return True
+        if n < 2:
+            logger.debug(
+                "@%s: Follow tap did not stick — retry (%s/3).", username, n + 1
+            )
+
+    logger.warning(
+        f"Could not follow @{username} from list row.",
+        extra={"color": Fore.RED},
+    )
+    UniversalActions(device).detect_block(device)
+    return False
+
+
+
 def _story_like_resource_ids():
     """Return the initialized ResourceID instance (not the class)."""
     global ResourceID

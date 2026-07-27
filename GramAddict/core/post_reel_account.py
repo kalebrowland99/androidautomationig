@@ -19,18 +19,38 @@ POST_REEL_STATE_FILENAME = "post_reel_state.json"
 POST_MEDIA_DIRNAME = "post_media"
 MAX_HASHTAGS = 5
 HASHTAG_RE = re.compile(r"#\w+")
+EMOJI_RE = re.compile(
+    "["
+    "\U0001F1E0-\U0001F1FF"
+    "\U0001F300-\U0001F5FF"
+    "\U0001F600-\U0001F64F"
+    "\U0001F680-\U0001F6FF"
+    "\U0001F700-\U0001F77F"
+    "\U0001F780-\U0001F7FF"
+    "\U0001F800-\U0001F8FF"
+    "\U0001F900-\U0001F9FF"
+    "\U0001FA00-\U0001FA6F"
+    "\U0001FA70-\U0001FAFF"
+    "\U00002702-\U000027B0"
+    "\U000024C2-\U0001F251"
+    "]+",
+    flags=re.UNICODE,
+)
+
+# Fixed ending for every auto-generated reel caption.
+REQUIRED_CAPTION_HASHTAGS = "#nashvillewedding #nashvilleweddingvideographer"
 
 DEFAULT_PROMPT_615 = (
-    "Write an Instagram Reel caption for 615FILMS. "
-    "Tone: cinematic, professional, wedding/film production brand. "
-    "Include exactly 5 relevant hashtags at the end (Instagram max is 5). "
-    "Keep under 2200 characters. Return only the caption text."
+    "Write one Instagram Reel caption sentence for 615FILMS (Nashville wedding video). "
+    "Sound like a real person — casual, specific, not polished or AI. "
+    "Exactly ONE sentence. No emojis. No quotation marks. No hashtags. "
+    "Return only that sentence."
 )
 DEFAULT_PROMPT_YLF = (
-    "Write an Instagram Reel caption for YourLoveFilms. "
-    "Tone: romantic, warm, couples and love stories. "
-    "Include exactly 5 relevant hashtags at the end (Instagram max is 5). "
-    "Keep under 2200 characters. Return only the caption text."
+    "Write one Instagram Reel caption sentence for YourLoveFilms (couples / love stories). "
+    "Sound like a real person — casual, specific, not polished or AI. "
+    "Exactly ONE sentence. No emojis. No quotation marks. No hashtags. "
+    "Return only that sentence."
 )
 
 
@@ -42,6 +62,28 @@ def limit_hashtags(text: str, max_count: int = MAX_HASHTAGS) -> str:
     for match in reversed(matches[max_count:]):
         text = text[: match.start()] + text[match.end() :]
     return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
+def _strip_emojis(text: str) -> str:
+    return EMOJI_RE.sub("", text)
+
+
+def normalize_reel_caption(text: str) -> str:
+    """One human sentence + fixed Nashville hashtags; no emojis."""
+    cleaned = _strip_emojis(text or "")
+    cleaned = cleaned.replace('"', "").replace("“", "").replace("”", "")
+    # Drop any model-generated hashtags; we append the required ones.
+    cleaned = HASHTAG_RE.sub("", cleaned)
+    cleaned = re.sub(r"[ \t]+", " ", cleaned).strip()
+    # Keep only the first sentence.
+    parts = re.split(r"(?<=[.!?])\s+", cleaned)
+    sentence = (parts[0] if parts else cleaned).strip()
+    if sentence and sentence[-1] not in ".!?":
+        sentence = sentence.rstrip(" .,;:") + "."
+    sentence = sentence.strip()
+    if not sentence:
+        sentence = "A little piece of their day."
+    return f"{sentence} {REQUIRED_CAPTION_HASHTAGS}".strip()
 
 
 def _account_dir(account_id: str) -> Path:
@@ -185,21 +227,39 @@ def generate_caption(account_id: str, *, batch: Optional[str] = None) -> str:
             {
                 "role": "system",
                 "content": (
-                    "You write Instagram Reel captions with hashtags. "
-                    "Instagram allows a maximum of 5 hashtags per post."
+                    "You write short Instagram Reel captions that sound human, "
+                    "never AI. Exactly one sentence. No emojis. No hashtags. "
+                    "No quotation marks. Return only the sentence."
                 ),
             },
             {"role": "user", "content": prompt},
         ],
-        max_tokens=800,
+        max_tokens=120,
     )
     text = (response.choices[0].message.content or "").strip()
     if not text:
         raise RuntimeError("OpenAI returned empty caption")
-    trimmed = limit_hashtags(text)
-    if trimmed != text:
-        logger.info("Trimmed caption hashtags to Instagram max of %s", MAX_HASHTAGS)
-    return trimmed
+    return normalize_reel_caption(text)
+
+
+DEFAULT_POST_RETRY_ATTEMPTS = 3  # total tries per post number (1 initial + retries)
+
+
+def _restart_instagram_for_post_retry(device) -> bool:
+    """Force-close Instagram and reopen so a failed reel can start clean."""
+    from GramAddict.core.utils import close_instagram, open_instagram, random_sleep
+
+    try:
+        close_instagram(device)
+    except Exception as exc:
+        logger.warning("Could not close Instagram before reel retry: %s", exc)
+    random_sleep(2, 4, modulable=False)
+    try:
+        ok = open_instagram(device)
+    except Exception as exc:
+        logger.warning("Could not reopen Instagram before reel retry: %s", exc)
+        return False
+    return bool(ok)
 
 
 def run_post_reel_session(
@@ -209,9 +269,16 @@ def run_post_reel_session(
     *,
     posts_count: Optional[int] = None,
 ) -> dict[str, Any]:
-    """Post N reels; increment counter only after each confirmed success."""
+    """Post N reels; increment counter only after each confirmed success.
+
+    On failure for a given post number, close/reopen Instagram and retry that
+    same queue slot from the beginning (never advances the counter until the
+    post is confirmed). If Share already went through, detect the pending-upload
+    banner and count it as success so the same reel is not double-posted.
+    """
     from GramAddict.core.post_reel import (
         list_local_media,
+        looks_like_reel_uploaded,
         run_single_reel_post,
         wait_for_uploads_to_finish,
     )
@@ -220,6 +287,12 @@ def run_post_reel_session(
     settings = get_account_post_reel(account_id)
     count = posts_count if posts_count is not None else int(settings.get("posts-per-session") or 1)
     count = max(1, count)
+    try:
+        max_attempts = int(settings.get("retry-attempts") or DEFAULT_POST_RETRY_ATTEMPTS)
+    except (TypeError, ValueError):
+        max_attempts = DEFAULT_POST_RETRY_ATTEMPTS
+    max_attempts = max(1, max_attempts)
+
     media_dir = media_dir_for_account(account_id)
     files = list_local_media(media_dir)
     if not files:
@@ -260,6 +333,7 @@ def run_post_reel_session(
         counter = get_media_selection_number(account_id)
         media_index = (counter - 1) % len(files)
         gallery_select = 1 if clear_each else counter
+        media_name = files[media_index].name
 
         try:
             caption = generate_caption(account_id)
@@ -271,40 +345,152 @@ def run_post_reel_session(
                 "results": results,
             }
 
-        try:
-            result = run_single_reel_post(
-                device,
-                serial,
-                media_dir=media_dir,
-                media_index=media_index,
-                gallery_select_number=gallery_select,
-                caption=caption,
-                clear_gallery=clear_each,
-                paste_caption=True,
+        last_result: dict[str, Any] = {
+            "success": False,
+            "message": "Reel posting did not run",
+            "steps": [],
+        }
+        succeeded = False
+
+        for attempt in range(1, max_attempts + 1):
+            logger.info(
+                "Posting reel #%s (%s) for %s — attempt %s/%s",
+                counter,
+                media_name,
+                account_id,
+                attempt,
+                max_attempts,
             )
-        except Exception as exc:
-            # Never let a reel-posting error (e.g. an adb timeout while clearing
-            # the gallery) crash the whole bot — fail this run gracefully so the
-            # session continues on to its other jobs (feed, followers, etc.).
-            logger.error("Reel posting aborted for %s: %s", account_id, exc)
+            try:
+                result = run_single_reel_post(
+                    device,
+                    serial,
+                    media_dir=media_dir,
+                    media_index=media_index,
+                    gallery_select_number=gallery_select,
+                    caption=caption,
+                    clear_gallery=clear_each,
+                    paste_caption=True,
+                )
+            except Exception as exc:
+                # Never let a reel-posting error (e.g. an adb timeout while clearing
+                # the gallery) crash the whole bot — fail this attempt, then retry
+                # the same post number after a clean app restart.
+                logger.error(
+                    "Reel post #%s attempt %s/%s error for %s: %s",
+                    counter,
+                    attempt,
+                    max_attempts,
+                    account_id,
+                    exc,
+                )
+                result = {
+                    "success": False,
+                    "message": f"Reel posting error: {exc}",
+                    "steps": [],
+                    "media_file": media_name,
+                }
+
+            last_result = dict(result)
+            last_result["attempt"] = attempt
+            last_result["post_number"] = counter
+            results.append(last_result)
+
+            if result.get("success"):
+                succeeded = True
+                break
+
+            steps = list(result.get("steps") or [])
+            share_tapped = "share" in steps
+            # Share may have worked even if composer confirmation timed out —
+            # check for the pending-upload banner before retrying the same file.
+            if share_tapped:
+                try:
+                    if looks_like_reel_uploaded(device):
+                        logger.info(
+                            "Post #%s (%s) looks already uploading after Share — "
+                            "counting as success (skip retry to avoid double-post).",
+                            counter,
+                            media_name,
+                        )
+                        last_result["success"] = True
+                        last_result["message"] = (
+                            f"Reel posted ({media_name}) — confirmed via upload banner"
+                        )
+                        last_result["confirmed_via"] = "upload_pending"
+                        succeeded = True
+                        break
+                except Exception as exc:
+                    logger.debug("Upload-banner check failed: %s", exc)
+
+            if attempt >= max_attempts:
+                break
+
+            logger.warning(
+                "Post #%s (%s) failed (%s) — closing Instagram and retrying "
+                "the same post number from the start (%s/%s).",
+                counter,
+                media_name,
+                result.get("message", "unknown"),
+                attempt + 1,
+                max_attempts,
+            )
+            if not _restart_instagram_for_post_retry(device):
+                logger.error(
+                    "Could not restart Instagram for post #%s retry — aborting this reel.",
+                    counter,
+                )
+                break
+            # After a Share-tapped ambiguity, check again on a fresh Home.
+            if share_tapped:
+                try:
+                    if looks_like_reel_uploaded(device):
+                        logger.info(
+                            "Post #%s already uploading after app restart — "
+                            "counting as success (no double-post).",
+                            counter,
+                        )
+                        last_result["success"] = True
+                        last_result["message"] = (
+                            f"Reel posted ({media_name}) — confirmed via upload banner after restart"
+                        )
+                        last_result["confirmed_via"] = "upload_pending_after_restart"
+                        succeeded = True
+                        break
+                except Exception:
+                    pass
+            random_sleep(2, 4, modulable=False)
+
+        if not succeeded:
             return {
                 "success": False,
-                "message": f"Reel posting error: {exc}",
+                "message": last_result.get("message", f"Post #{counter} failed"),
                 "posted": posted,
                 "results": results,
+                "failed_post_number": counter,
             }
-        results.append(result)
-        if not result.get("success"):
-            return {
-                "success": False,
-                "message": result.get("message", "Post failed"),
-                "posted": posted,
-                "results": results,
-            }
+
+        # Only advance the queue after this specific post number succeeded.
         increment_media_counter(account_id)
         posted += 1
         if posted < count:
-            random_sleep(3, 6, modulable=False)
+            # Land back on Home and let the previous upload settle before the
+            # next create tap — otherwise IG often stays on the composer/upload
+            # sheet and gallery thumbnails never appear.
+            try:
+                from GramAddict.core.post_reel import tap_home_tab
+
+                tap_home_tab(device)
+            except Exception:
+                pass
+            random_sleep(4, 7, modulable=False)
+            try:
+                device.deviceV2.press("back")
+                random_sleep(0.8, 1.4, modulable=False)
+                tap_home_tab(device)
+            except Exception:
+                pass
+            random_sleep(2, 4, modulable=False)
 
     # All reels submitted — land on Home and wait for Instagram to finish the
     # background uploads before the session moves on (closing too early can drop

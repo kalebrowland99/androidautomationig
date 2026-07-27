@@ -19,6 +19,7 @@ from GramAddict.core.live_progress import load_live_progress
 from GramAddict.plugins.telegram import (
     _calculate_session_duration,
     load_sessions,
+    telegram_bot_send_photo,
     telegram_bot_send_text,
 )
 
@@ -33,6 +34,24 @@ STATUS_WORDS = frozenset(
     {"status", "update", "progress", "/status", "/update", "/progress", "stats"}
 )
 HELP_WORDS = frozenset({"help", "/help", "/start", "commands"})
+FARM_SCREEN_WORDS = frozenset(
+    {
+        "farm",
+        "screens",
+        "screenshot",
+        "screenshots",
+        "phones",
+        "homepage",
+        "mirror",
+        "/farm",
+        "/screens",
+        "/screenshot",
+        "/screenshots",
+        "/phones",
+        "/homepage",
+        "/mirror",
+    }
+)
 
 POLL_SECONDS = 4.0
 
@@ -103,6 +122,9 @@ def _parse_command(text: str) -> tuple[str, Optional[str]]:
         return "", None
     parts = cleaned.split(maxsplit=1)
     command = parts[0].lower()
+    # `/screenshot@MyBot` → `/screenshot`
+    if command.startswith("/") and "@" in command:
+        command = command.split("@", 1)[0]
     arg = parts[1].strip().lstrip("@") if len(parts) > 1 else None
     return command, arg or None
 
@@ -181,24 +203,58 @@ def _format_account_status(account: TelegramAccount) -> str:
             follows = live.get("total_followed", 0)
             watches = live.get("total_watched", 0)
             story_likes = live.get("total_story_likes", 0)
+            story_accounts = live.get("total_story_accounts_liked", 0)
             comments = live.get("total_comments", 0)
             limits = live.get("limits") or {}
             likes_lim = limits.get("likes")
             watches_lim = limits.get("watches")
-            stats = [f"Likes {likes}" + (f"/{likes_lim}" if likes_lim else "")]
-            if follows:
-                stats.append(f"Follows {follows}")
-            if watches:
-                stats.append(f"Stories {watches}")
-            if story_likes or watches:
+            follows_lim = limits.get("follows")
+            today = live.get("today") if isinstance(live.get("today"), dict) else {}
+            today_follows = today.get("follows")
+            today_stories = today.get("story_likes")
+            today_story_accts = today.get("story_accounts_liked")
+            today_follows_goal = today.get("follows_goal")
+            today_stories_goal = today.get("story_likes_goal")
+
+            stats: list[str] = []
+            if likes or likes_lim:
                 stats.append(
-                    f"Story likes {story_likes}"
+                    f"Liked Posts {likes}" + (f"/{likes_lim}" if likes_lim else "")
+                )
+            # Story + follow are the main signals for story-like farms.
+            story_n = story_likes or watches
+            if story_n or watches_lim or story_accounts:
+                stats.append(
+                    f"Liked Stories {story_n}"
                     + (f"/{watches_lim}" if watches_lim else "")
                 )
+            if story_accounts or story_n:
+                stats.append(f"Story Accounts {story_accounts}")
+            # Always show Followed for live sessions (follow-after-story-like farms).
+            stats.append(
+                f"Followed {follows}" + (f"/{follows_lim}" if follows_lim else "")
+            )
             if comments:
                 stats.append(f"Comments {comments}")
             lines.append(f"• Job: `{job}`")
-            lines.append(f"• {' · '.join(stats)}")
+            lines.append(f"• Session: {' · '.join(stats)}")
+
+            today_bits: list[str] = []
+            if today_stories is not None or today_story_accts is not None:
+                ts = int(today_stories or 0)
+                today_bits.append(
+                    f"Liked Stories {ts}"
+                    + (f"/{today_stories_goal}" if today_stories_goal else "")
+                )
+                today_bits.append(f"Story Accounts {int(today_story_accts or 0)}")
+            if today_follows is not None or today_follows_goal:
+                tf = int(today_follows or 0)
+                today_bits.append(
+                    f"Followed {tf}"
+                    + (f"/{today_follows_goal}" if today_follows_goal else "")
+                )
+            if today_bits:
+                lines.append(f"• Today: {' · '.join(today_bits)}")
         else:
             lines.append("• Session active (waiting for progress snapshot)")
     else:
@@ -285,10 +341,94 @@ def _build_help_reply(ai_enabled: bool = False) -> str:
         "Text any of these while the dashboard is running:\n"
         "• `status` or `update` — current progress\n"
         "• `status ACCOUNT` — one account only\n"
+        "• `farm` / `screens` / `homepage` — Farm dashboard + phone screenshots\n"
         f"{ai_line}"
         "• `help` — this message\n\n"
         "Turn off in dashboard → Reports → *Allow Telegram status commands*."
     )
+
+
+def _send_farm_screens(token: str, chat_id: str) -> None:
+    """Send Farm dashboard (top+bottom) then a collage of woken phone screens."""
+    telegram_bot_send_text(
+        token,
+        chat_id,
+        "Capturing Farm dashboard + phones…",
+        parse_mode=None,
+    )
+    _send_chat_action(token, chat_id, "upload_photo")
+
+    # 1) Farm devices table built from live account/device data (not the SPA).
+    try:
+        import importlib
+
+        import dashboard.dashboard_screenshot as dash_shot
+
+        # Dashboard process may have cached an older module — always reload.
+        dash_shot = importlib.reload(dash_shot)
+        dash_jpeg = dash_shot.capture_dashboard_farm_jpeg()
+        response = telegram_bot_send_photo(
+            token,
+            chat_id,
+            dash_jpeg,
+            caption="Farm devices (top + bottom) · live account info",
+            parse_mode=None,
+        )
+        if not response or not response.get("ok"):
+            error = (response or {}).get("description") or "unknown error"
+            telegram_bot_send_text(
+                token,
+                chat_id,
+                f"Dashboard screenshot send failed: {error}",
+                parse_mode=None,
+            )
+    except Exception as exc:
+        telegram_bot_send_text(
+            token,
+            chat_id,
+            f"Couldn't capture Farm dashboard: {exc}",
+            parse_mode=None,
+        )
+
+    # 2) Phone grid (wakes screens first so running bots aren't black).
+    _send_chat_action(token, chat_id, "upload_photo")
+    try:
+        from dashboard.preview_stream import build_farm_collage_jpeg
+
+        jpeg, meta = build_farm_collage_jpeg()
+    except Exception as exc:
+        telegram_bot_send_text(
+            token,
+            chat_id,
+            f"Couldn't capture farm phones: {exc}",
+            parse_mode=None,
+        )
+        return
+
+    ok = int(meta.get("ok") or 0)
+    count = int(meta.get("count") or 0)
+    source = meta.get("source") or "connected"
+    failures = meta.get("failures") or []
+    caption = f"Farm phones ({ok}/{count})"
+    if source == "farm_selection":
+        caption += " · farm selection"
+    if failures:
+        failed_names = ", ".join(
+            (f.get("serial") or "")[-8:] for f in failures[:5] if isinstance(f, dict)
+        )
+        caption += f"\nFailed: {failed_names}"
+
+    response = telegram_bot_send_photo(
+        token, chat_id, jpeg, caption=caption, parse_mode=None
+    )
+    if not response or not response.get("ok"):
+        error = (response or {}).get("description") or "unknown error"
+        telegram_bot_send_text(
+            token,
+            chat_id,
+            f"Phone grid send failed: {error}",
+            parse_mode=None,
+        )
 
 
 def _detailed_log_tail(username: str, *, max_lines: int = 45) -> list[str]:
@@ -318,8 +458,12 @@ CAPABILITIES = (
     "from a local dashboard. It can automatically like posts, follow/unfollow "
     "accounts, watch stories, leave AI comments, send DMs, and post reels. "
     "Telegram commands: `status`/`update` (live progress), `status <account>` "
-    "(one account), `help`. The owner can also ask free-form questions and this "
-    "assistant answers from the live status and logs below."
+    "(one account), `farm`/`screens`/`homepage` (Farm dashboard top+bottom photo "
+    "plus woken phone screenshot grid), `help`. End-of-session Telegram summaries "
+    "are disabled. The owner can also ask free-form questions and this assistant "
+    "answers from the live status and logs below. If they ask for a screenshot of "
+    "the farm/phones/homepage/dashboard, tell them to text `farm` or `screens` "
+    "(you cannot attach photos yourself)."
 )
 
 
@@ -430,9 +574,20 @@ def _handle_message(listener: TelegramBotListener, message: dict[str, Any]) -> N
         return
 
     ai_enabled = any(acct.ai_assistant for acct in matching)
+    status_enabled = any(acct.status_commands for acct in matching)
 
     if command in HELP_WORDS:
         reply = _build_help_reply(ai_enabled=ai_enabled)
+    elif command in FARM_SCREEN_WORDS:
+        if not status_enabled:
+            telegram_bot_send_text(
+                listener.token,
+                chat_id,
+                "Telegram status commands are disabled for this account.",
+            )
+            return
+        _send_farm_screens(listener.token, chat_id)
+        return
     elif command in STATUS_WORDS:
         reply = _build_status_reply(matching, arg)
     elif ai_enabled:
@@ -501,7 +656,11 @@ class TelegramCommandService:
                         try:
                             _handle_message(listener, message)
                         except Exception as exc:
-                            logger.debug("Telegram command handler error: %s", exc)
+                            logger.warning(
+                                "Telegram command handler error: %s",
+                                exc,
+                                exc_info=True,
+                            )
                 if updates:
                     _save_offsets(offsets)
             self._stop.wait(POLL_SECONDS)

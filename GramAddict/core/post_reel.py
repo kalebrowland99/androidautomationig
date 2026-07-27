@@ -192,6 +192,126 @@ def push_video_to_gallery(serial: str, local_path: Path) -> Optional[str]:
     return remote
 
 
+def _ui_exists(device: DeviceFacade, resource_id: str, *, timeout: float = 0.4) -> bool:
+    try:
+        return bool(device.deviceV2(resourceId=resource_id).exists(timeout=timeout))
+    except Exception:
+        return False
+
+
+def poll_for_element(
+    device: DeviceFacade,
+    check,
+    *,
+    name: str,
+    timeout: float = 22.0,
+    poll_interval: float = 0.7,
+    vision_after: float = 5.0,
+    max_vision_attempts: int = 3,
+) -> bool:
+    """Poll until ``check()`` is true; use vision to dismiss popups if it stalls.
+
+    Flow:
+    1. Keep checking for the known next posting element.
+    2. If it still isn't there after ``vision_after`` seconds, ask vision for a
+       single dismiss-tap coordinate (Not now / X / Cancel / etc.).
+    3. Resume polling for the same element.
+    4. Give up only after ``timeout``.
+    """
+    start = time.time()
+    last_vision = 0.0
+    vision_tries = 0
+    while time.time() - start < timeout:
+        try:
+            if check():
+                return True
+        except Exception as exc:
+            logger.debug("poll_for_element(%s) check error: %s", name, exc)
+
+        elapsed = time.time() - start
+        due_for_vision = (
+            elapsed >= vision_after
+            and vision_tries < max_vision_attempts
+            and (time.time() - last_vision) >= vision_after
+        )
+        if due_for_vision:
+            vision_tries += 1
+            last_vision = time.time()
+            logger.info(
+                "Still waiting for %s after %.1fs — asking vision for a popup dismiss tap "
+                "(%s/%s).",
+                name,
+                elapsed,
+                vision_tries,
+                max_vision_attempts,
+            )
+            try:
+                from GramAddict.core.vision_popup import dismiss_popup_with_vision
+
+                dismissed = dismiss_popup_with_vision(
+                    device,
+                    reason=f"post_reel_poll:{name}",
+                    respect_cooldown=False,
+                )
+                if dismissed:
+                    random_sleep(0.7, 1.2, modulable=False)
+                    # Immediate re-check after dismiss before sleeping again.
+                    try:
+                        if check():
+                            return True
+                    except Exception:
+                        pass
+                else:
+                    logger.debug(
+                        "Vision reported no popup while waiting for %s — keep polling.",
+                        name,
+                    )
+            except Exception as exc:
+                logger.debug("Vision poll dismiss failed for %s: %s", name, exc)
+
+        random_sleep(
+            max(0.35, poll_interval * 0.75),
+            max(0.55, poll_interval * 1.25),
+            modulable=False,
+        )
+
+    logger.warning("Timed out after %.1fs waiting for %s", timeout, name)
+    return False
+
+
+def poll_and_click_resource(
+    device: DeviceFacade,
+    resource_id: str,
+    *,
+    name: str,
+    timeout: float = 22.0,
+    vision_after: float = 5.0,
+) -> bool:
+    """Poll for a known resourceId, then click it (with vision popup recovery)."""
+
+    def _ready() -> bool:
+        return _ui_exists(device, resource_id, timeout=0.35)
+
+    if not poll_for_element(
+        device,
+        _ready,
+        name=name,
+        timeout=timeout,
+        vision_after=vision_after,
+    ):
+        return False
+    try:
+        btn = device.deviceV2(resourceId=resource_id)
+        if not btn.exists(timeout=1):
+            return False
+        btn.click()
+        random_sleep(0.5, 1.0, modulable=False)
+        return True
+    except Exception as exc:
+        logger.debug("Click failed for %s (%s): %s", name, resource_id, exc)
+        return False
+
+
 def tap_home_tab(device: DeviceFacade) -> bool:
     """Land on the Home feed via the bottom-left Home tab.
 
@@ -219,13 +339,28 @@ def tap_create_button(device: DeviceFacade) -> bool:
     """Tap Instagram top-left + create button (always lands on Home first)."""
     tap_home_tab(device)
     d = device.deviceV2
-    left = d(resourceId=CREATE_LEFT_CONTAINER)
-    if left.wait(timeout=5):
+
+    def _create_ready() -> bool:
+        left = d(resourceId=CREATE_LEFT_CONTAINER)
+        if not left.exists(timeout=0.35):
+            return False
         img = left.child(className="android.widget.ImageView")
-        if img.wait(timeout=3):
+        return bool(img.exists(timeout=0.35))
+
+    if poll_for_element(
+        device,
+        _create_ready,
+        name="create (+)",
+        timeout=18.0,
+        vision_after=5.0,
+    ):
+        left = d(resourceId=CREATE_LEFT_CONTAINER)
+        img = left.child(className="android.widget.ImageView")
+        if img.exists(timeout=1):
             img.click()
             random_sleep(0.4, 0.8, modulable=False)
             return True
+
     info = device.get_info()
     x = int(info["displayWidth"] * 0.08)
     y = int(info["displayHeight"] * 0.07)
@@ -243,11 +378,28 @@ def select_recent_media(device: DeviceFacade, number: int) -> bool:
     if number < 1:
         return False
     d = device.deviceV2
-    thumbs = d(resourceId=GALLERY_THUMB)
-    if not thumbs.wait(timeout=8):
-        logger.error("Gallery thumbnails not found")
-        return False
     index = number - 1
+
+    def _gallery_ready() -> bool:
+        thumbs = d(resourceId=GALLERY_THUMB)
+        if not thumbs.exists(timeout=0.35):
+            return False
+        try:
+            return int(thumbs.count) > index
+        except Exception:
+            return False
+
+    if not poll_for_element(
+        device,
+        _gallery_ready,
+        name=f"gallery thumb #{number}",
+        timeout=22.0,
+        vision_after=5.0,
+    ):
+        logger.error("Gallery thumbnails not found (need item #%s)", number)
+        return False
+
+    thumbs = d(resourceId=GALLERY_THUMB)
     count = thumbs.count
     if count <= index:
         logger.error("Gallery has %s item(s); need index %s (select #%s)", count, index, number)
@@ -258,17 +410,17 @@ def select_recent_media(device: DeviceFacade, number: int) -> bool:
 
 
 def tap_next_top(device: DeviceFacade) -> bool:
-    d = device.deviceV2
-    btn = d(resourceId=NEXT_TOP)
-    if btn.wait(timeout=8):
-        btn.click()
-        random_sleep(0.5, 1.0, modulable=False)
-        return True
-    return False
+    return poll_and_click_resource(
+        device,
+        NEXT_TOP,
+        name="top-right Next",
+        timeout=20.0,
+        vision_after=5.0,
+    )
 
 
 def dismiss_popups_center(device: DeviceFacade, taps: int = 3) -> None:
-    """Tap screen center to dismiss overlays."""
+    """Tap screen center to dismiss overlays (legacy fallback)."""
     info = device.get_info()
     x = int(info["displayWidth"] / 2)
     y = int(info["displayHeight"] / 2)
@@ -279,24 +431,35 @@ def dismiss_popups_center(device: DeviceFacade, taps: int = 3) -> None:
 
 
 def tap_next_clips(device: DeviceFacade) -> bool:
-    d = device.deviceV2
-    btn = d(resourceId=CLIPS_NEXT)
-    if btn.wait(timeout=10):
-        btn.click()
-        random_sleep(0.5, 1.0, modulable=False)
-        return True
-    return False
+    return poll_and_click_resource(
+        device,
+        CLIPS_NEXT,
+        name="clips Next",
+        timeout=22.0,
+        vision_after=5.0,
+    )
 
 
 def tap_caption_field(device: DeviceFacade) -> bool:
+    def _caption_ready() -> bool:
+        return _ui_exists(device, CAPTION_INPUT, timeout=0.35)
+
+    if not poll_for_element(
+        device,
+        _caption_ready,
+        name="caption field",
+        timeout=22.0,
+        vision_after=5.0,
+    ):
+        return False
     field = device.find(resourceId=CAPTION_INPUT)
-    if field.exists(Timeout.MEDIUM):
+    if field.exists(Timeout.SHORT):
         field.click()
         random_sleep(0.3, 0.6, modulable=False)
         return True
     d = device.deviceV2
     caption = d(resourceId=CAPTION_INPUT)
-    if caption.wait(timeout=5):
+    if caption.exists(timeout=1):
         caption.click()
         random_sleep(0.3, 0.6, modulable=False)
         return True
@@ -315,25 +478,63 @@ def enter_caption(device: DeviceFacade, text: str, *, paste: bool = True) -> boo
 
 
 def tap_share(device: DeviceFacade) -> bool:
-    d = device.deviceV2
-    btn = d(resourceId=SHARE_BUTTON)
-    if btn.wait(timeout=8):
-        btn.click()
+    ok = poll_and_click_resource(
+        device,
+        SHARE_BUTTON,
+        name="Share",
+        timeout=20.0,
+        vision_after=5.0,
+    )
+    if ok:
         random_sleep(1.0, 2.0, modulable=False)
-        return True
-    return False
+    return ok
 
 
 def wait_for_post_success(device: DeviceFacade, timeout: float = 45.0) -> bool:
     """Wait until share UI closes (reel upload finished or left composer)."""
     d = device.deviceV2
     deadline = time.time() + timeout
+    last_vision = 0.0
     while time.time() < deadline:
         if not d(resourceId=SHARE_BUTTON).exists(timeout=1):
             if not d(resourceId=CAPTION_INPUT).exists(timeout=1):
                 random_sleep(1.0, 2.0, modulable=False)
                 return True
+        # Composer stuck open — maybe a confirmation popup is covering it.
+        if time.time() - last_vision >= 8.0:
+            last_vision = time.time()
+            try:
+                from GramAddict.core.vision_popup import dismiss_popup_with_vision
+
+                if dismiss_popup_with_vision(
+                    device,
+                    reason="post_reel_poll:post_success",
+                    respect_cooldown=False,
+                ):
+                    random_sleep(0.8, 1.3, modulable=False)
+                    continue
+            except Exception:
+                pass
         random_sleep(0.8, 1.2, modulable=False)
+    return False
+
+
+def looks_like_reel_uploaded(device: DeviceFacade, *, appear_timeout: float = 20.0) -> bool:
+    """True if Home shows Instagram's pending-upload banner after a Share.
+
+    Used after an ambiguous failure (Share tapped but composer confirmation
+    timed out) so we do not retry and double-post the same reel.
+    """
+    try:
+        tap_home_tab(device)
+    except Exception:
+        pass
+    random_sleep(1.5, 2.5, modulable=False)
+    deadline = time.time() + max(3.0, appear_timeout)
+    while time.time() < deadline:
+        if _upload_pending(device):
+            return True
+        random_sleep(1.0, 1.5, modulable=False)
     return False
 
 
@@ -474,15 +675,16 @@ def prepare_gallery_with_media(
 
 
 def _step_or_recover(device: DeviceFacade, step, *, name: str) -> bool:
-    """Run a reel step; on failure, try to dismiss a blocking popup via the
-    vision model and retry the step once. A modal/permission sheet covering the
-    UI is a common reason a tap/selector "can't find" its target."""
+    """Run a reel step. Steps already poll + vision-dismiss internally; this is a
+    thin last-chance wrapper that retries once after a final vision dismiss."""
     if step():
         return True
     try:
         from GramAddict.core.vision_popup import dismiss_popup_with_vision
 
-        if dismiss_popup_with_vision(device, reason=f"post_reel:{name}"):
+        if dismiss_popup_with_vision(
+            device, reason=f"post_reel:{name}", respect_cooldown=False
+        ):
             random_sleep(0.8, 1.4, modulable=False)
             return step()
     except Exception as exc:
@@ -504,6 +706,9 @@ def run_single_reel_post(
     """
     Full single-reel flow. Returns dict with success, message, and steps completed.
     Does NOT increment any counter — caller handles persistence after success.
+
+    Each known UI target is polled; if it stalls, vision taps a dismiss coordinate
+    and polling resumes so popups don't kill the flow.
     """
     steps: list[str] = []
 
@@ -515,29 +720,46 @@ def run_single_reel_post(
 
     steps.append(f"pushed:{local.name}")
 
+    # Always start create from Home — mid-session posts otherwise open the wrong sheet.
+    try:
+        tap_home_tab(device)
+        random_sleep(1.0, 1.8, modulable=False)
+    except Exception:
+        pass
+
     if not _step_or_recover(device, lambda: tap_create_button(device), name="tap_create"):
         return {"success": False, "message": "Could not tap create (+) button", "steps": steps}
     steps.append("tap_create")
 
-    random_sleep(1.0, 2.0, modulable=False)
+    random_sleep(1.0, 1.8, modulable=False)
 
     if not _step_or_recover(
         device, lambda: select_recent_media(device, gallery_select_number), name="select_media"
     ):
-        return {
-            "success": False,
-            "message": f"Could not select gallery item #{gallery_select_number}",
-            "steps": steps,
-        }
+        # One recovery: back out, Home, create again, then poll gallery again.
+        try:
+            device.deviceV2.press("back")
+            random_sleep(0.6, 1.0, modulable=False)
+            tap_home_tab(device)
+            random_sleep(1.0, 1.8, modulable=False)
+            tap_create_button(device)
+            random_sleep(1.0, 1.8, modulable=False)
+        except Exception:
+            pass
+        if not select_recent_media(device, gallery_select_number):
+            return {
+                "success": False,
+                "message": f"Could not select gallery item #{gallery_select_number}",
+                "steps": steps,
+            }
     steps.append(f"select_media:{gallery_select_number}")
 
     if not _step_or_recover(device, lambda: tap_next_top(device), name="next_top"):
         return {"success": False, "message": "Could not tap top-right Next", "steps": steps}
     steps.append("next_top")
 
-    dismiss_popups_center(device, taps=3)
-    steps.append("dismiss_popups")
-
+    # Clips Next is the next known element — poll (with vision) instead of blind
+    # center taps that can dismiss the editor itself.
     if not _step_or_recover(device, lambda: tap_next_clips(device), name="next_clips"):
         return {"success": False, "message": "Could not tap clips Next", "steps": steps}
     steps.append("next_clips")

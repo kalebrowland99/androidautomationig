@@ -416,66 +416,129 @@ def press_home(serial: str) -> None:
 
 
 def send_text(serial: str, text: str, *, press_enter: bool = False) -> dict[str, Any]:
-    """Type text into the focused field on the phone (bypasses broken on-screen keyboard).
+    """Type text into the focused field on the phone (dashboard → device).
 
-    Uses ADB broadcast to FastInputIME so this works even while a bot holds the
-    uiautomator device lock (HelpWire / Mac keyboard → dashboard → phone).
+    Prefer ATX ``send_keys`` / clipboard paste. FastInputIME broadcasts often
+    return ``result=0`` (not handled) on these Samsung builds, so we never treat
+    a bare "Broadcast completed" as success.
     """
     import base64
     import subprocess
 
+    require_allowed_serial(serial)
     text = text if text is not None else ""
     if text == "" and not press_enter:
         raise ValueError("Nothing to send")
 
-    def _adb_shell(*args: str, timeout: float = 12) -> subprocess.CompletedProcess:
+    adb = resolve_adb()
+    errors: list[str] = []
+
+    def _adb(*args: str, timeout: float = 12) -> subprocess.CompletedProcess:
         return subprocess.run(
-            ["adb", "-s", serial, "shell", *args],
+            [adb, "-s", serial, *args],
             capture_output=True,
             text=True,
             timeout=timeout,
             check=False,
         )
 
-    # Make sure FastInputIME can receive broadcasts (doesn't require u2 lock).
-    _adb_shell("ime", "enable", "com.github.uiautomator/.FastInputIME", timeout=8)
-    _adb_shell("ime", "set", "com.github.uiautomator/.FastInputIME", timeout=8)
+    def _adb_shell(*args: str, timeout: float = 12) -> subprocess.CompletedProcess:
+        return _adb("shell", *args, timeout=timeout)
+
+    def _broadcast_ok(stdout: str) -> bool:
+        # openatx AdbKeyboard / FastInputIME set result=-1 on success.
+        return "Broadcast completed: result=-1" in (stdout or "")
+
+    method = ""
 
     if text:
-        # Base64 avoids shell escaping issues with spaces/quotes/emoji.
-        b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
-        proc = _adb_shell(
-            "am",
-            "broadcast",
-            "-a",
-            "ADB_INPUT_B64",
-            "--es",
-            "msg",
-            b64,
-            timeout=15,
-        )
-        ok = proc.returncode == 0 and "Broadcast completed" in (proc.stdout or "")
-        if not ok:
-            # Fallback: plain ADB_INPUT_TEXT (ASCII-ish).
-            safe = text.replace(" ", "%s")
-            proc2 = _adb_shell(
-                "am",
-                "broadcast",
-                "-a",
-                "ADB_INPUT_TEXT",
-                "--es",
-                "msg",
-                safe,
-                timeout=15,
-            )
-            if proc2.returncode != 0:
-                err = (proc.stderr or proc2.stderr or proc.stdout or "adb failed").strip()
-                raise RuntimeError(err[:300])
+        # 1) uiautomator2 send_keys (works with a focused EditText; no Farm lock).
+        try:
+            device = connect(serial)
+            focused = False
+            try:
+                focused = bool(device(focused=True).exists(timeout=0.6))
+            except Exception:
+                focused = False
+            if not focused:
+                raise RuntimeError("No focused text field — tap a field on the phone first")
+            device.send_keys(text, clear=False)
+            method = "send_keys"
+        except Exception as exc:  # noqa: BLE001 - try next method
+            errors.append(f"send_keys: {exc}")
+
+            # 2) Clipboard + paste via ATX (unicode-safe).
+            try:
+                device = connect(serial)
+                device.set_clipboard(text)
+                paste = _adb_shell("input", "keyevent", "279", timeout=8)  # KEYCODE_PASTE
+                if paste.returncode != 0:
+                    raise RuntimeError((paste.stderr or paste.stdout or "paste failed").strip())
+                method = "clipboard"
+            except Exception as exc2:  # noqa: BLE001
+                errors.append(f"clipboard: {exc2}")
+
+                # 3) FastInputIME / AdbKeyboard broadcasts (only if result=-1).
+                typed = False
+                b64 = base64.b64encode(text.encode("utf-8")).decode("ascii")
+                ime_attempts = [
+                    ("com.github.uiautomator/.FastInputIME", "ADB_INPUT_TEXT", "msg", text),
+                    ("com.github.uiautomator/.FastInputIME", "ADB_SET_TEXT", "msg", text),
+                    ("com.genfarmer.uiautomator/.AdbKeyboard", "ADB_KEYBOARD_INPUT_TEXT", "text", b64),
+                    ("com.genfarmer.uiautomator/.AdbKeyboard", "ADB_KEYBOARD_SET_TEXT", "text", b64),
+                ]
+                for ime, action, extra_key, payload in ime_attempts:
+                    _adb_shell("ime", "enable", ime, timeout=6)
+                    _adb_shell("ime", "set", ime, timeout=6)
+                    proc = _adb_shell(
+                        "am",
+                        "broadcast",
+                        "-a",
+                        action,
+                        "--es",
+                        extra_key,
+                        payload,
+                        timeout=12,
+                    )
+                    out = (proc.stdout or "") + (proc.stderr or "")
+                    if proc.returncode == 0 and _broadcast_ok(out):
+                        method = f"ime:{action}"
+                        typed = True
+                        break
+                    errors.append(f"{action}: {(out or 'no result=-1').strip()[:120]}")
+                if not typed:
+                    # 4) Last resort: adb input text (ASCII / limited charset).
+                    safe = (
+                        text.replace("\\", "\\\\")
+                        .replace(" ", "%s")
+                        .replace("'", "\\'")
+                        .replace('"', '\\"')
+                        .replace("`", "\\`")
+                        .replace("(", "\\(")
+                        .replace(")", "\\)")
+                        .replace("&", "\\&")
+                        .replace("<", "\\<")
+                        .replace(">", "\\>")
+                        .replace(";", "\\;")
+                        .replace("|", "\\|")
+                    )
+                    proc = _adb_shell("input", "text", safe, timeout=15)
+                    if proc.returncode != 0:
+                        detail = " | ".join(errors[-4:]) or (
+                            proc.stderr or proc.stdout or "input text failed"
+                        ).strip()
+                        raise RuntimeError(detail[:400])
+                    method = "input_text"
 
     if press_enter:
         _adb_shell("input", "keyevent", "66", timeout=8)  # KEYCODE_ENTER
 
-    return {"ok": True, "chars": len(text), "enter": bool(press_enter)}
+    return {
+        "ok": True,
+        "chars": len(text),
+        "enter": bool(press_enter),
+        "method": method or ("enter" if press_enter else ""),
+    }
 
 
 def dump_to_disk(serial: str) -> dict[str, Any]:
@@ -536,52 +599,172 @@ def resolve_scrcpy() -> str | None:
     return None
 
 
-def scrcpy_running_for_device(serial: str) -> bool:
+def _scrcpy_pids_for_device(serial: str) -> list[int]:
+    """Return PIDs of scrcpy processes mirroring this serial."""
     try:
         result = subprocess.run(
-            ["ps", "-ax", "-o", "command="],
+            ["ps", "-ax", "-o", "pid=,command="],
             capture_output=True,
             text=True,
             check=False,
         )
     except OSError:
-        return False
+        return []
     serial_pattern = re.compile(rf"(?:-s\s+{re.escape(serial)})(?:\s|$)")
+    pids: list[int] = []
     for line in result.stdout.splitlines():
+        line = line.strip()
         if "scrcpy" not in line:
             continue
-        if serial_pattern.search(line):
-            return True
-    return False
+        if not serial_pattern.search(line):
+            continue
+        parts = line.split(None, 1)
+        if not parts:
+            continue
+        try:
+            pids.append(int(parts[0]))
+        except ValueError:
+            continue
+    return pids
 
 
-def start_mirror(serial: str) -> dict[str, str]:
-    import os
+def scrcpy_running_for_device(serial: str) -> bool:
+    return bool(_scrcpy_pids_for_device(serial))
 
+
+def _kill_scrcpy_for_device(serial: str) -> list[int]:
+    killed: list[int] = []
+    for pid in _scrcpy_pids_for_device(serial):
+        try:
+            os.kill(pid, 15)
+            killed.append(pid)
+        except OSError:
+            continue
+    if killed:
+        deadline = time.time() + 2.0
+        while time.time() < deadline and _scrcpy_pids_for_device(serial):
+            time.sleep(0.1)
+        for pid in _scrcpy_pids_for_device(serial):
+            try:
+                os.kill(pid, 9)
+            except OSError:
+                pass
+    return killed
+
+
+def _activate_scrcpy_pids(pids: list[int]) -> bool:
+    """Bring scrcpy window(s) to the front on macOS. Returns True if any activated."""
+    if not pids or sys.platform != "darwin":
+        return False
+    activated = False
+    for pid in pids:
+        script = (
+            f'tell application "System Events"\n'
+            f"  try\n"
+            f"    set frontmost of first process whose unix id is {int(pid)} to true\n"
+            f"  end try\n"
+            f"end tell"
+        )
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", script],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+            if result.returncode == 0:
+                activated = True
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    return activated
+
+
+def _wake_device_for_mirror(adb: str, serial: str) -> None:
+    for args in (
+        ["shell", "input", "keyevent", "KEYCODE_WAKEUP"],
+        ["shell", "svc", "power", "stayon", "usb"],
+    ):
+        try:
+            subprocess.run(
+                [adb, "-s", serial, *args],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def start_mirror(serial: str, *, force: bool = False) -> dict[str, str]:
     from dashboard.gramaddict_config import username_for_device
 
-    # Diagnostic: scrcpy is only ever launched here. If a scrcpy window appears
-    # during a run and this line does NOT print in the dashboard terminal, the
-    # mirror is being opened from outside the dashboard (e.g. tools/device_lab.py).
-    print(f"[mirror] start_mirror called for {serial}", flush=True)
+    print(f"[mirror] start_mirror called for {serial} force={force}", flush=True)
 
     scrcpy = resolve_scrcpy()
     if not scrcpy:
         raise RuntimeError("scrcpy not found. Install scrcpy or set SCRCPY env var.")
-    if scrcpy_running_for_device(serial):
-        return {"status": "already_running"}
+
+    existing = _scrcpy_pids_for_device(serial)
+    if existing and not force:
+        if _activate_scrcpy_pids(existing):
+            return {"status": "focused"}
+        # Process listed but no window we could raise — treat as stale and relaunch.
+        print(
+            f"[mirror] scrcpy pid(s) {existing} for {serial} not focusable; relaunching",
+            flush=True,
+        )
+        force = True
+
+    if force and existing:
+        killed = _kill_scrcpy_for_device(serial)
+        print(f"[mirror] killed stale scrcpy {killed} for {serial}", flush=True)
+
     adb = resolve_adb()
     devices = list_devices(adb, serial_filter=DEVICE_SERIAL_FILTER or None)
     device = next((d for d in devices if d.serial == serial), None)
     if device is None:
         raise RuntimeError(f"Device not connected: {serial}")
+
+    _wake_device_for_mirror(adb, serial)
+
     title = scrcpy_window_title(serial, username_for_device(serial))
     env = os.environ.copy()
     env["ADB"] = adb
-    subprocess.Popen(
-        [scrcpy, "-s", serial, "--window-title", title, "--max-size", "1024"],
-        env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    return {"status": "started"}
+    # Keep stderr so we can surface startup failures (ADB busy, unauthorized, etc.).
+    err_path = PROJECT_ROOT / "logs" / f"scrcpy-{serial[-8:]}.stderr.log"
+    err_path.parent.mkdir(parents=True, exist_ok=True)
+    err_file = err_path.open("w", encoding="utf-8")
+    try:
+        proc = subprocess.Popen(
+            [
+                scrcpy,
+                "-s",
+                serial,
+                "--window-title",
+                title,
+                "--max-size",
+                "1024",
+            ],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=err_file,
+            start_new_session=True,
+        )
+    finally:
+        err_file.close()
+
+    # scrcpy either shows a window quickly or exits with an error.
+    time.sleep(0.9)
+    if proc.poll() is not None:
+        detail = ""
+        try:
+            detail = err_path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            pass
+        detail = detail or f"scrcpy exited immediately (code {proc.returncode})"
+        print(f"[mirror] scrcpy failed for {serial}: {detail}", flush=True)
+        raise RuntimeError(detail.splitlines()[-1][:300])
+
+    _activate_scrcpy_pids([proc.pid])
+    return {"status": "started", "pid": str(proc.pid)}

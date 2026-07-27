@@ -380,14 +380,65 @@ class DeviceFacade:
         except uiautomator2.JSONRPCError as e:
             logger.debug(f"Could not disable auto-rotate: {e}")
 
-    def unlock(self):
+    def unlock(self, pin: Optional[str] = None):
+        """Wake the lock screen. If ``pin`` is set, type digits only (no OK/Enter).
+
+        Many Samsung lock screens unlock automatically after the last PIN digit.
+        """
         self.swipe(Direction.UP, 0.8)
         sleep(2)
         logger.debug(f"Screen locked: {self.is_screen_locked()}")
+        if self.is_screen_locked() and pin:
+            self._enter_lock_pin(pin)
+            sleep(1.5)
+            logger.debug(f"Screen locked after PIN: {self.is_screen_locked()}")
         if self.is_screen_locked():
             self.swipe(Direction.RIGHT, 0.8)
             sleep(2)
             logger.debug(f"Screen locked: {self.is_screen_locked()}")
+            if self.is_screen_locked() and pin:
+                self._enter_lock_pin(pin)
+                sleep(1.5)
+                logger.debug(f"Screen locked after PIN: {self.is_screen_locked()}")
+
+    def _enter_lock_pin(self, pin: str) -> None:
+        """Type lock-screen PIN digits without pressing OK/Enter."""
+        digits = "".join(ch for ch in str(pin) if ch.isdigit())
+        if not digits:
+            return
+        logger.info(
+            "Entering lock-screen PIN (%s digits) — waiting for auto-unlock (no OK tap).",
+            len(digits),
+        )
+        for ch in digits:
+            tapped = False
+            try:
+                node = self.deviceV2(text=ch)
+                if node.exists(timeout=0.5):
+                    node.click()
+                    tapped = True
+                else:
+                    node = self.deviceV2(description=ch)
+                    if node.exists(timeout=0.5):
+                        node.click()
+                        tapped = True
+            except Exception as e:
+                logger.debug("PIN digit UI tap failed for %s: %s", ch, e)
+            if not tapped:
+                # KEYCODE_0=7 … KEYCODE_9=16
+                keycode = 7 + int(ch)
+                try:
+                    self.deviceV2.shell(f"input keyevent {keycode}")
+                except Exception:
+                    run(
+                        f"adb -s {self.deviceV2.serial} shell input keyevent {keycode}",
+                        encoding="utf-8",
+                        stdout=PIPE,
+                        stderr=PIPE,
+                        shell=True,
+                    )
+            sleep(0.25)
+        # Intentionally no OK / Enter — phone unlocks on its own after the last digit.
 
     def screen_off(self):
         self.deviceV2.screen_off()

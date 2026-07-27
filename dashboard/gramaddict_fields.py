@@ -10,6 +10,12 @@ EDITABLE_FIELDS: dict[str, list[dict[str, Any]]] = {
         {"key": "username", "label": "Instagram username", "type": "text", "placeholder": "yourname"},
         {"key": "device", "label": "Phone", "type": "device"},
         {
+            "key": "unlock-pin",
+            "label": "Lock-screen PIN",
+            "type": "text",
+            "placeholder": "1493",
+        },
+        {
             "key": "brand-pool",
             "label": "Brand pool",
             "type": "select",
@@ -48,9 +54,25 @@ EDITABLE_FIELDS: dict[str, list[dict[str, Any]]] = {
             "enable_checkbox": True,
         },
         {"key": "blogger", "label": "Visit these accounts", "type": "lines", "placeholder": "username"},
-        {"key": "blogger-followers", "label": "Visit followers of these accounts", "type": "lines", "placeholder": "username"},
+        {
+            "key": "blogger-followers",
+            "label": "Visit followers of these accounts",
+            "type": "lines",
+            "placeholder": "username",
+            "companion_bools": [
+                {
+                    "key": "follow-after-story-like",
+                    "label": "Also follow after story like",
+                }
+            ],
+        },
         {"key": "blogger-following", "label": "Visit who these accounts follow", "type": "lines", "placeholder": "username"},
-        {"key": "blogger-post-likers", "label": "Visit people who liked their posts", "type": "lines", "placeholder": "username"},
+        {
+            "key": "blogger-post-likers",
+            "label": "Visit people who liked their posts",
+            "type": "lines",
+            "placeholder": "username",
+        },
         {"key": "hashtag-likers-top", "label": "Visit likers on top hashtag posts", "type": "lines", "placeholder": "hashtag"},
         {"key": "hashtag-likers-recent", "label": "Visit likers on recent hashtag posts", "type": "lines", "placeholder": "hashtag"},
         {"key": "hashtag-posts-top", "label": "Interact via top hashtag posts", "type": "lines", "placeholder": "hashtag"},

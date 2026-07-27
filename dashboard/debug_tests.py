@@ -2248,12 +2248,27 @@ def run_debug_test(
 
     if kind == "wake_unlock":
         device.wake_up()
+        pin = None
+        try:
+            from dashboard.gramaddict_config import unlock_pin_for_serial
+
+            pin = unlock_pin_for_serial(serial)
+        except Exception:
+            pin = None
         if device.is_screen_locked():
-            device.unlock()
+            device.unlock(pin=pin)
         locked = device.is_screen_locked()
         return {
             "success": not locked,
-            "message": "Screen woken and unlocked" if not locked else "Screen still locked",
+            "message": (
+                "Screen woken and unlocked"
+                if not locked
+                else (
+                    "Screen still locked — check unlock-pin"
+                    if pin
+                    else "Screen still locked"
+                )
+            ),
             "test_id": test_id,
         }
 

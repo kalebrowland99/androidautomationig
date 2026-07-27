@@ -12,3 +12,4 @@ packaging~=20.9
 openai>=1.0.0
 weditor==0.7.3
 python-multipart>=0.0.9
+Pillow>=10.0.0

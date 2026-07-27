@@ -27,6 +27,10 @@ CONFIG_TEMPLATE = PROJECT_ROOT / "config-examples" / "config.yml"
 _bot_processes: dict[str, subprocess.Popen[str]] = {}
 _bot_log_buffers: dict[str, list[str]] = {}
 _story_likes_log_buffers: dict[str, list[str]] = {}
+# One `ps -ax` scan shared across all accounts for a short window so
+# list_accounts / accounts_status don't pay ~N full process-table walks.
+_bot_ps_scan_cache: tuple[float, dict[str, int]] | None = None
+_BOT_PS_SCAN_TTL_S = 2.0
 BOT_PID_FILENAME = ".bot.pid"
 
 from dashboard.gramaddict_fields import (
@@ -329,12 +333,24 @@ def _schema_field_entries() -> list[dict[str, Any]]:
                 entries.append({**field, "key": f"{field['key']}-list", "type": "lines"})
             else:
                 entries.append(field)
+            for companion in field.get("companion_bools") or []:
+                entries.append(
+                    {
+                        "key": companion["key"],
+                        "label": companion.get("label") or companion["key"],
+                        "type": "bool",
+                    }
+                )
     return entries
 
 
 def _strip_dashboard_only_keys(data: dict[str, Any]) -> dict[str, Any]:
     for key in DASHBOARD_ONLY_CONFIG_KEYS:
         data.pop(key, None)
+    # Empty lists become `--flag` with no values; configargparse nargs="+" then crashes.
+    for key, value in list(data.items()):
+        if isinstance(value, list) and not value:
+            data.pop(key, None)
     return data
 
 
@@ -731,11 +747,21 @@ def _verify_bot_pid(account_id: str, pid: int) -> bool:
 
 
 def _find_bot_pid_by_scan(account_id: str) -> int | None:
-    config_markers = {
-        str(_config_path(account_id)),
-        str(_config_path(account_id).resolve()),
-        f"accounts/{account_id}/config.yml",
-    }
+    return _bot_pids_by_scan().get(account_id)
+
+
+def _bot_pids_by_scan(*, force: bool = False) -> dict[str, int]:
+    """Map account_id → pid for every running GramAddict bot (one `ps` call)."""
+    global _bot_ps_scan_cache
+    now = time.monotonic()
+    if (
+        not force
+        and _bot_ps_scan_cache is not None
+        and (now - _bot_ps_scan_cache[0]) < _BOT_PS_SCAN_TTL_S
+    ):
+        return _bot_ps_scan_cache[1]
+
+    found: dict[str, int] = {}
     try:
         result = subprocess.run(
             ["ps", "-ax", "-o", "pid=,command="],
@@ -745,20 +771,31 @@ def _find_bot_pid_by_scan(account_id: str) -> int | None:
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return None
+        _bot_ps_scan_cache = (now, found)
+        return found
+
+    # accounts/<id>/config.yml  (absolute or relative paths)
+    marker_re = re.compile(
+        r"(?:^|[\\/\s])accounts[\\/]([^\\/\s]+)[\\/]config\.yml(?:\s|$)"
+    )
     for line in (result.stdout or "").splitlines():
         stripped = line.strip()
         if not stripped or "run.py" not in stripped:
             continue
-        if not any(marker in stripped for marker in config_markers):
-            continue
         try:
-            pid = int(stripped.split(None, 1)[0])
+            pid_s, command = stripped.split(None, 1)
+            pid = int(pid_s)
         except (ValueError, IndexError):
             continue
-        if _is_pid_running(pid):
-            return pid
-    return None
+        if not _is_pid_running(pid):
+            continue
+        match = marker_re.search(command)
+        if not match:
+            continue
+        found.setdefault(match.group(1), pid)
+
+    _bot_ps_scan_cache = (now, found)
+    return found
 
 
 def _resolve_running_bot_pid(account_id: str) -> int | None:
@@ -1018,6 +1055,8 @@ def ensure_account_template_files(account_id: str) -> dict[str, Any]:
 def list_accounts() -> list[dict[str, Any]]:
     if not ACCOUNTS_DIR.is_dir():
         return []
+    # One process-table scan for the whole list (avoids N× `ps -ax`).
+    _bot_pids_by_scan(force=True)
     accounts: list[dict[str, Any]] = []
     for folder in sorted(ACCOUNTS_DIR.iterdir()):
         if not folder.is_dir():
@@ -1116,6 +1155,26 @@ def username_for_device(serial: str) -> str | None:
         if data.get("device") == device_serial:
             handle = (data.get("username") or folder.name or "").strip().lstrip("@")
             return handle or None
+    return None
+
+
+def unlock_pin_for_serial(serial: str) -> str | None:
+    """Lock-screen PIN from the account config linked to this phone, if any."""
+    device_serial = serial.strip()
+    if not device_serial or not ACCOUNTS_DIR.is_dir():
+        return None
+    for folder in ACCOUNTS_DIR.iterdir():
+        if not folder.is_dir():
+            continue
+        config_path = folder / "config.yml"
+        if not config_path.is_file():
+            continue
+        data = _load_yaml(config_path)
+        if data.get("device") != device_serial:
+            continue
+        pin = str(data.get("unlock-pin") or "").strip()
+        digits = "".join(ch for ch in pin if ch.isdigit())
+        return digits or None
     return None
 
 
@@ -1252,6 +1311,21 @@ def resolve_farm_selection_targets(
     }
 
 
+def _resolve_account_folder_id(account_id: str) -> str:
+    """Return the real accounts/ folder name for id (case-insensitive)."""
+    account_id = (account_id or "").strip()
+    if not account_id or not ACCOUNTS_DIR.is_dir():
+        return account_id
+    direct = ACCOUNTS_DIR / account_id
+    if direct.is_dir():
+        return account_id
+    wanted = account_id.lower()
+    for folder in ACCOUNTS_DIR.iterdir():
+        if folder.is_dir() and folder.name.lower() == wanted:
+            return folder.name
+    return account_id
+
+
 def _load_device_links() -> dict[str, str]:
     if not DEVICE_LINKS_FILE.is_file():
         return {}
@@ -1264,6 +1338,21 @@ def _load_device_links() -> dict[str, str]:
     return {str(k): str(v) for k, v in data.items() if k and v}
 
 
+def _normalize_device_links() -> dict[str, str]:
+    """Heal folder-id casing drift in .device_links.json (Farm names are master)."""
+    links = _load_device_links()
+    fixed: dict[str, str] = {}
+    changed = False
+    for hardware_id, account_id in links.items():
+        resolved = _resolve_account_folder_id(account_id)
+        if resolved != account_id:
+            changed = True
+        fixed[hardware_id] = resolved
+    if changed:
+        _save_device_links(fixed)
+    return fixed
+
+
 def _save_device_links(links: dict[str, str]) -> None:
     ACCOUNTS_DIR.mkdir(parents=True, exist_ok=True)
     with atomic_write(DEVICE_LINKS_FILE, overwrite=True, encoding="utf-8") as handle:
@@ -1272,12 +1361,17 @@ def _save_device_links(links: dict[str, str]) -> None:
 
 def set_device_link(hardware_id: str, account_id: str) -> None:
     hardware_id = (hardware_id or "").strip()
-    account_id = (account_id or "").strip()
+    account_id = _resolve_account_folder_id((account_id or "").strip())
     if not hardware_id or not account_id:
         return
     links = _load_device_links()
     # a hardware id maps to exactly one account; an account to one phone
-    links = {hw: acc for hw, acc in links.items() if acc != account_id}
+    account_l = account_id.lower()
+    links = {
+        hw: acc
+        for hw, acc in links.items()
+        if acc != account_id and str(acc).lower() != account_l
+    }
     links[hardware_id] = account_id
     _save_device_links(links)
 
@@ -1286,8 +1380,13 @@ def clear_device_link_for_account(account_id: str) -> None:
     account_id = (account_id or "").strip()
     if not account_id:
         return
+    account_l = account_id.lower()
     links = _load_device_links()
-    trimmed = {hw: acc for hw, acc in links.items() if acc != account_id}
+    trimmed = {
+        hw: acc
+        for hw, acc in links.items()
+        if acc != account_id and str(acc).lower() != account_l
+    }
     if trimmed != links:
         _save_device_links(trimmed)
 
@@ -1296,8 +1395,10 @@ def device_id_for_account(account_id: str) -> str:
     account_id = (account_id or "").strip()
     if not account_id:
         return ""
+    account_l = account_id.lower()
     for hardware_id, acc in _load_device_links().items():
-        if acc == account_id:
+        # Case-insensitive: farm @names are master; folder casing can drift.
+        if acc == account_id or str(acc).lower() == account_l:
             return hardware_id
     return ""
 
@@ -1323,7 +1424,7 @@ def reconcile_device_links(devices: list[dict[str, Any]]) -> bool:
     `devices` should include `serial` and `hardware_id`. Returns True if any
     account's linked serial was updated or a new link was recorded.
     """
-    links = _load_device_links()
+    links = _normalize_device_links()
     links_changed = False
     healed = False
     for dev in devices:
@@ -1333,6 +1434,7 @@ def reconcile_device_links(devices: list[dict[str, Any]]) -> bool:
             continue
         account_id = links.get(hardware_id)
         if account_id:
+            account_id = _resolve_account_folder_id(account_id)
             config_path = _config_path(account_id)
             if not config_path.is_file():
                 links.pop(hardware_id, None)
@@ -1438,9 +1540,44 @@ def assign_account_to_device(serial: str, username: str | None) -> dict[str, Any
                 clear_device_link_for_account(folder.name)
         return {"serial": device_serial, "account_id": None, "username": ""}
 
-    account_id = _safe_account_id(handle)
-    if not _config_path(account_id).is_file():
-        create_account(handle)
+    linked_id = account_id_for_device(device_serial)
+    if not linked_id:
+        # Fall back to stable hardware→account map (survives serial changes).
+        try:
+            from dashboard import device_service
+
+            hardware_id = device_service.get_hardware_id(device_serial)
+        except Exception:
+            hardware_id = ""
+        if hardware_id:
+            linked_id = _load_device_links().get(hardware_id) or None
+
+    handle_l = handle.lower()
+    existing_for_handle: str | None = None
+    candidate_id = _safe_account_id(handle)
+    if _config_path(candidate_id).is_file():
+        existing_for_handle = candidate_id
+    elif ACCOUNTS_DIR.is_dir():
+        for folder in ACCOUNTS_DIR.iterdir():
+            if not folder.is_dir() or not (folder / "config.yml").is_file():
+                continue
+            data = _load_yaml(folder / "config.yml")
+            uname = str(data.get("username") or folder.name).strip().lstrip("@")
+            if uname.lower() == handle_l:
+                existing_for_handle = folder.name
+                break
+
+    if existing_for_handle:
+        # Link this phone to an account that already has this @handle.
+        account_id = existing_for_handle
+    elif linked_id and _config_path(linked_id).is_file():
+        # Rename in place — keep the same account folder/id so dropdowns,
+        # pool membership, and history stay attached to this phone's account.
+        account_id = linked_id
+    else:
+        account_id = candidate_id
+        if not _config_path(account_id).is_file():
+            create_account(handle)
 
     if ACCOUNTS_DIR.is_dir():
         for folder in ACCOUNTS_DIR.iterdir():
@@ -1995,6 +2132,16 @@ def _enrich_today_progress(
             except Exception:
                 cfg = {}
         goals = daily_goals_from_config(cfg)
+        likes_on = _config_pct_enabled(cfg, "likes-percentage", default=True)
+        follows_on = _config_pct_enabled(cfg, "follow-percentage", default=True)
+        stories_on = _config_pct_enabled(cfg, "stories-percentage", default=False)
+        # follow-after-story-like follows even when follow-percentage is 0.
+        follow_after_story = bool(cfg.get("follow-after-story-like"))
+        follows_on = follows_on or follow_after_story
+        progress["likes_enabled"] = likes_on
+        progress["follows_enabled"] = follows_on
+        progress["stories_enabled"] = stories_on
+        progress["follow_after_story_like"] = follow_after_story
 
         live_today = progress.get("today")
         if isinstance(live_today, dict) and running:
@@ -2026,13 +2173,25 @@ def _enrich_today_progress(
             "story_likes": stories,
             "story_accounts_liked": story_accounts,
             "follows": follows,
-            "likes_goal": goals["likes"],
-            "story_likes_goal": goals["stories"],
-            "follows_goal": goals["follows"],
+            # Don't show goals for actions the account isn't configured to do.
+            "likes_goal": goals["likes"] if likes_on else None,
+            "story_likes_goal": goals["stories"] if stories_on else None,
+            "follows_goal": goals["follows"] if follows_on else None,
         }
     except Exception:
         progress.setdefault("today", None)
     return progress
+
+
+def _config_pct_enabled(cfg: dict[str, Any], key: str, *, default: bool) -> bool:
+    """True when a percentage config is > 0 (supports '0', '40', '10-20')."""
+    raw = cfg.get(key)
+    if raw is None or raw == "":
+        return default
+    try:
+        return float(str(raw).strip().split("-")[0]) > 0
+    except (TypeError, ValueError):
+        return default
 
 
 def _progress_for_account_status(
@@ -2093,6 +2252,7 @@ def accounts_status() -> list[dict[str, Any]]:
     """
     if not ACCOUNTS_DIR.is_dir():
         return []
+    _bot_pids_by_scan(force=True)
     out: list[dict[str, Any]] = []
     for folder in sorted(ACCOUNTS_DIR.iterdir()):
         if not folder.is_dir() or not (folder / "config.yml").is_file():

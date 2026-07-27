@@ -10,11 +10,11 @@ from typing import Any, Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from dashboard import account_templates, brand_pools, debug_log, device_service, follow_vision_config, gramaddict_config, post_reel_config, telegram_commands, weditor_service
+from dashboard import account_templates, brand_pools, debug_log, device_service, follow_vision_config, gramaddict_config, post_reel_config, preview_stream, telegram_commands, weditor_service
 from dashboard.session_estimate import estimate_session
 from dashboard.session_explain import explain_session
 from GramAddict.core.account_safety import is_autopost_locked
@@ -461,6 +461,97 @@ async def index() -> HTMLResponse:
     return HTMLResponse(html)
 
 
+@app.get("/mirror", response_class=HTMLResponse)
+async def mirror_page() -> HTMLResponse:
+    html = (BASE_DIR / "templates" / "mirror.html").read_text(encoding="utf-8")
+    return HTMLResponse(html)
+
+
+@app.get("/api/preview/{serial}.mjpeg")
+async def api_preview_mjpeg(
+    serial: str,
+    max_size: int = 480,
+    quality: int = 55,
+    fps: float = 2.0,
+    preset: str = "",
+) -> StreamingResponse:
+    _check_serial(serial)
+    try:
+        params = preview_stream.clamp_preview_params(
+            max_size=max_size,
+            quality=quality,
+            fps=fps,
+            preset=preset or None,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    def frame_iter():
+        yield from preview_stream.mjpeg_frames(
+            serial,
+            max_size=int(params["max_size"]),
+            quality=int(params["quality"]),
+            fps=float(params["fps"]),
+        )
+
+    return StreamingResponse(
+        frame_iter(),
+        media_type="multipart/x-mixed-replace; boundary=frame",
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/api/preview/{serial}.jpg")
+async def api_preview_jpeg(
+    serial: str,
+    max_size: int = 480,
+    quality: int = 55,
+    preset: str = "",
+    wake: int = 0,
+) -> StreamingResponse:
+    """Single JPEG snapshot (mass mirror polls these; use wake=1 to force wake)."""
+    _check_serial(serial)
+    params = preview_stream.clamp_preview_params(
+        max_size=max_size, quality=quality, preset=preset or None
+    )
+    try:
+        jpeg = await asyncio.to_thread(
+            preview_stream.capture_jpeg,
+            serial,
+            int(params["max_size"]),
+            int(params["quality"]),
+            wake=bool(wake),
+            retry_if_black=True,
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return StreamingResponse(iter([jpeg]), media_type="image/jpeg")
+
+
+@app.get("/api/preview/targets")
+async def api_preview_targets():
+    try:
+        return await asyncio.to_thread(preview_stream.list_preview_targets)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/api/preview/wake-all")
+async def api_preview_wake_all():
+    """Wake farm/connected phones so Mass Mirror tiles aren't black/doze frames."""
+    try:
+        return await asyncio.to_thread(preview_stream.wake_all_preview_targets)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
 @app.get("/api/devices/meta")
 async def api_devices_meta() -> dict[str, str]:
     return {"device_filter": device_service.get_device_filter()}
@@ -562,10 +653,10 @@ async def api_dump(serial: str) -> dict[str, Any]:
 
 
 @app.post("/api/devices/{serial}/mirror")
-async def api_mirror(serial: str) -> dict[str, str]:
+async def api_mirror(serial: str, force: bool = False) -> dict[str, str]:
     _check_serial(serial)
     try:
-        return await _device_call(device_service.start_mirror, serial)
+        return await _device_call(device_service.start_mirror, serial, force=force)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 

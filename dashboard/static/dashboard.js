@@ -648,20 +648,35 @@ function progressLimitsHtml(acct, acctRunning) {
   };
   // Always show — even at 0 — so Farm makes accounts-liked visible.
   const countPart = (label, val) => `${label} ${val ?? 0}`;
+  // Hide metrics for actions turned off in config (e.g. follow-percentage: 0),
+  // except follow-after-story-like still counts as follows enabled.
+  const showMetric = (enabled) => enabled !== false;
+  // Always show Followed when the action is on (incl. after story like), even at 0.
+  const followedPart = (val, lim) => {
+    if (lim != null && lim !== "") return `Followed ${val ?? 0}/${lim}`;
+    return `Followed ${val ?? 0}`;
+  };
 
   // Session line (while active / waiting / action-limit).
   let sessionLine = "";
   if (state !== "stopped") {
-    const parts = [
-      part("Liked Posts", p.likes, p.likes_limit),
-      part(
-        "Liked Stories",
-        p.story_likes || p.watched,
-        p.story_likes_limit ?? p.watches_limit
-      ),
-      countPart("Story Accounts", p.story_accounts_liked),
-      part("Followed", p.follows, p.follows_limit),
-    ];
+    const parts = [];
+    if (showMetric(p.likes_enabled)) {
+      parts.push(part("Liked Posts", p.likes, p.likes_limit));
+    }
+    if (showMetric(p.stories_enabled)) {
+      parts.push(
+        part(
+          "Liked Stories",
+          p.story_likes || p.watched,
+          p.story_likes_limit ?? p.watches_limit
+        )
+      );
+      parts.push(countPart("Story Accounts", p.story_accounts_liked));
+    }
+    if (showMetric(p.follows_enabled)) {
+      parts.push(followedPart(p.follows, p.follows_limit));
+    }
     if (
       (p.daily_story_likes != null && p.daily_story_likes > 0) ||
       p.current_job === "daily-story-likes"
@@ -682,15 +697,21 @@ function progressLimitsHtml(acct, acctRunning) {
   const t = p.today;
   let todayLine = "";
   if (t && typeof t === "object") {
-    const todayParts = [
-      part("Liked Posts", t.likes, t.likes_goal),
-      part("Liked Stories", t.story_likes, t.story_likes_goal),
-      countPart("Story Accounts", t.story_accounts_liked),
-      part("Followed", t.follows, t.follows_goal),
-    ].filter(Boolean);
-    if (todayParts.length) {
+    const todayParts = [];
+    if (showMetric(p.likes_enabled)) {
+      todayParts.push(part("Liked Posts", t.likes, t.likes_goal));
+    }
+    if (showMetric(p.stories_enabled)) {
+      todayParts.push(part("Liked Stories", t.story_likes, t.story_likes_goal));
+      todayParts.push(countPart("Story Accounts", t.story_accounts_liked));
+    }
+    if (showMetric(p.follows_enabled)) {
+      todayParts.push(followedPart(t.follows, t.follows_goal));
+    }
+    const filtered = todayParts.filter(Boolean);
+    if (filtered.length) {
       todayLine = `<div class="phones-account-progress phones-account-today" title="Today (goal is display-only)">${escapeHtml(
-        "Today · " + todayParts.join(" · ")
+        "Today · " + filtered.join(" · ")
       )}</div>`;
     }
   }
@@ -747,10 +768,16 @@ function deviceLinkedAccountIds() {
   // Accounts that have an @ assigned to a phone (device serial or stable hardware
   // id), whether or not that phone is currently connected.
   const ids = new Set();
-  for (const acct of gaAccounts) {
-    if (acct && (acct.device || acct.device_id)) ids.add(acct.id);
+  for (const acct of farmLinkedAccounts()) {
+    ids.add(acct.id);
   }
   return ids;
+}
+
+function farmLinkedAccounts() {
+  // Farm page is the master name list: one @handle per linked phone.
+  // Other pages reuse this same set so dropdowns match the devices grid.
+  return gaAccounts.filter((acct) => acct && (acct.device || acct.device_id));
 }
 
 function openInstagramProfile(handle) {
@@ -853,17 +880,27 @@ async function onDeviceAccountBlur(serial, input) {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "Failed to save account");
-    await loadGaAccounts();
+    // Set selection BEFORE reload so both Account dropdowns rebuild with the
+    // new @handle on the same account id (in-place rename).
     if (data.account_id) {
       gaCurrentAccountId = data.account_id;
       localStorage.setItem("gaAccountId", data.account_id);
-      const select = $("ga-account-select");
-      if (select) select.value = data.account_id;
     }
+    await loadGaAccounts();
+    const select = $("ga-account-select");
+    if (select && data.account_id) select.value = data.account_id;
     if (activeSerial === serial) syncAccountSelectionFromPhone(serial);
     log(value ? `Linked @${value} to ${shortSerial(serial)}` : `Cleared account on ${shortSerial(serial)}`);
     updateContextStrip();
     renderDevices();
+    // Brand pool "Add account" list depends on linked @names.
+    if ((gaBrandPools.pools || []).length) {
+      try {
+        await loadBrandPools();
+      } catch (_) {
+        /* ignore */
+      }
+    }
   } catch (err) {
     log(err.message, "error");
     renderDevices();
@@ -984,9 +1021,13 @@ function rebuildSettingsSearchIndex() {
     const tabLabel = ACCOUNT_TAB_LABELS[tab] || tab;
     for (const field of fields) {
       const sub = inlineFieldSubKeys(field);
-      const selector = sub
+      let selector = sub
         ? `[data-ga-key="${sub.listKey}"]${sub.limitKey ? `, [data-ga-key="${sub.limitKey}"]` : ""}${sub.enabledKey ? `, [data-ga-key="${sub.enabledKey}"]` : ""}`
         : `[data-ga-key="${field.key}"]`;
+      const companions = sub?.companionBools || field.companion_bools || [];
+      if (companions.length) {
+        selector += companions.map((c) => `, [data-ga-key="${c.key}"]`).join("");
+      }
       items.push({
         key: field.key,
         label: field.label,
@@ -1264,8 +1305,9 @@ function populateCtxAccountSelect() {
   const select = $("ctx-account-select");
   const text = $("ctx-account");
   if (!select || !text) return;
+  const linked = farmLinkedAccounts();
   const acct = currentAccount();
-  if (gaAccounts.length <= 1) {
+  if (linked.length <= 1) {
     select.classList.add("hidden");
     text.classList.remove("hidden");
     text.textContent = acct ? `@${acct.username || acct.id}` : "None";
@@ -1273,7 +1315,7 @@ function populateCtxAccountSelect() {
   }
   select.classList.remove("hidden");
   text.classList.add("hidden");
-  select.innerHTML = gaAccounts
+  select.innerHTML = linked
     .map(
       (a) =>
         `<option value="${escapeHtml(a.id)}">@${escapeHtml(a.username || a.id)}${
@@ -1281,7 +1323,8 @@ function populateCtxAccountSelect() {
         }</option>`
     )
     .join("");
-  if (acct) select.value = acct.id;
+  if (acct && linked.some((a) => a.id === acct.id)) select.value = acct.id;
+  else if (linked.length) select.value = linked[0].id;
 }
 
 function onCtxAccountChange() {
@@ -1873,7 +1916,7 @@ async function sendPhoneText(event) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) throw new Error(data.detail || "Send failed");
-    log(`Sent ${data.chars ?? text.length} chars → ${shortSerial(serial)}`);
+    log(`Sent ${data.chars ?? text.length} chars → ${shortSerial(serial)}${data.method ? ` (${data.method})` : ""}`);
     if (input) {
       input.value = "";
       input.focus();
@@ -1886,14 +1929,30 @@ async function sendPhoneText(event) {
   return false;
 }
 
+const _mirrorLastClick = { serial: "", at: 0 };
+
 async function mirrorSelected() {
   const serial = activeSerial || [...selectedSerials][0];
   if (!serial) return;
+  const now = Date.now();
+  const force =
+    _mirrorLastClick.serial === serial && now - _mirrorLastClick.at < 4000;
+  _mirrorLastClick.serial = serial;
+  _mirrorLastClick.at = now;
   try {
-    const res = await fetch(`/api/devices/${serial}/mirror`, { method: "POST" });
+    const qs = force ? "?force=1" : "";
+    const res = await fetch(`/api/devices/${encodeURIComponent(serial)}/mirror${qs}`, {
+      method: "POST",
+    });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "Mirror failed");
-    log(data.status === "already_running" ? "Mirror already open" : "Mirror window opened (scrcpy)");
+    if (data.status === "focused") {
+      log("Mirror brought to front (click again to relaunch if you still don’t see it)");
+    } else if (data.status === "already_running") {
+      log("Mirror already open (click again to relaunch)");
+    } else {
+      log(force ? "Mirror relaunched (scrcpy)" : "Mirror window opened (scrcpy)");
+    }
   } catch (err) {
     log(`Mirror failed: ${err.message}`, "error");
   }
@@ -3492,6 +3551,9 @@ function inlineFieldSubKeys(field) {
   if (field.type === "inline-file-job") {
     const sub = { listKey: `${key}-list`, limitKey: `${key}-limit` };
     if (field.enable_checkbox) sub.enabledKey = `${key}-enabled`;
+    if (Array.isArray(field.companion_bools) && field.companion_bools.length) {
+      sub.companionBools = field.companion_bools;
+    }
     return sub;
   }
   if (field.type === "inline-lines-file") {
@@ -3506,7 +3568,7 @@ function applyInlineFileJobEnableState(fieldKey = "daily-story-likes") {
   const enabledInput = field.querySelector(`[data-ga-key="${fieldKey}-enabled"]`);
   const enabled = enabledInput ? enabledInput.checked : true;
   field.classList.toggle("inline-file-job-disabled", !enabled);
-  field.querySelectorAll("textarea, input.inline-file-limit").forEach((el) => {
+  field.querySelectorAll("textarea, input.inline-file-limit, .inline-file-companions input[type='checkbox']").forEach((el) => {
     el.disabled = !enabled;
     el.setAttribute("aria-disabled", enabled ? "false" : "true");
   });
@@ -3593,6 +3655,19 @@ function renderFormField(field, attr = "data-ga-key") {
           <span class="ga-check-label">${label}</span>
         </label>`
       : `<label>${label}</label>`;
+    const companions = (sub.companionBools || [])
+      .map((c) => {
+        const cLabel = gaFieldLabelHtml({
+          key: c.key,
+          label: c.label || c.key,
+          help: c.help || "",
+        });
+        return `<label class="ga-check inline-file-companion">
+          <input type="checkbox" class="ui-checkbox" ${attr}="${escapeHtml(c.key)}">
+          <span class="ga-check-label">${cLabel}</span>
+        </label>`;
+      })
+      .join("");
     return `
       <div class="field inline-file-job-field field-span-2" data-inline-file-job="${key}">
         <div class="inline-file-job-header">${header}</div>
@@ -3602,6 +3677,7 @@ function renderFormField(field, attr = "data-ga-key") {
           <label class="inline-file-sublabel">${limitLabel}</label>
           <input type="text" ${attr}="${sub.limitKey}" class="ga-input inline-file-limit" placeholder="${limitPh}" autocomplete="off">
         </div>
+        ${companions ? `<div class="inline-file-companions">${companions}</div>` : ""}
       </div>`;
   }
   if (field.type === "inline-lines-file") {
@@ -3620,7 +3696,20 @@ function renderFormField(field, attr = "data-ga-key") {
   }
   if (field.type === "lines") {
     const linesPlaceholder = placeholder || "One per line";
-    return `<div class="field">
+    const companions = (field.companion_bools || [])
+      .map((c) => {
+        const cLabel = gaFieldLabelHtml({
+          key: c.key,
+          label: c.label || c.key,
+          help: c.help || "",
+        });
+        return `<label class="ga-check inline-file-companion">
+          <input type="checkbox" class="ui-checkbox" ${attr}="${escapeHtml(c.key)}">
+          <span class="ga-check-label">${cLabel}</span>
+        </label>`;
+      })
+      .join("");
+    return `<div class="field field-span-2">
       <div class="lines-field-header">
         <label>${label}</label>
         <div class="lines-import-wrap">
@@ -3629,6 +3718,7 @@ function renderFormField(field, attr = "data-ga-key") {
         </div>
       </div>
       <textarea ${attr}="${key}" class="ga-input" rows="2" placeholder="${linesPlaceholder}"></textarea>
+      ${companions ? `<div class="inline-file-companions">${companions}</div>` : ""}
     </div>`;
   }
   if (field.type === "textarea") {
@@ -4937,8 +5027,9 @@ function renderTemplateApplyView() {
     subtitle.textContent =
       "Choose which accounts get this template. It replaces their settings — usernames and phone links stay.";
   const appliedIds = new Set((tmpl.applied_to || []).map((m) => m.account_id));
-  const rows = gaAccounts.length
-    ? gaAccounts
+  const linked = farmLinkedAccounts();
+  const rows = linked.length
+    ? linked
         .map((a) => {
           const isCurrent = a.id === gaCurrentAccountId;
           const already = appliedIds.has(a.id);
@@ -5208,18 +5299,23 @@ async function loadGaAccounts() {
     fields?.classList.remove("hidden");
     $("account-templates-bar")?.classList.remove("hidden");
     $("btn-delete-account")?.removeAttribute("disabled");
-    select.innerHTML = gaAccounts
+    // Farm-linked accounts only — same names as the devices grid.
+    const linked = farmLinkedAccounts();
+    const options = linked.length ? linked : gaAccounts;
+    select.innerHTML = options
       .map((a) => `<option value="${a.id}">${a.username || a.id}${a.running ? " (running)" : ""}</option>`)
       .join("");
-    if (gaCurrentAccountId && gaAccounts.some((a) => a.id === gaCurrentAccountId)) {
+    if (gaCurrentAccountId && options.some((a) => a.id === gaCurrentAccountId)) {
       select.value = gaCurrentAccountId;
     } else {
-      select.value = gaAccounts[0].id;
-      gaCurrentAccountId = gaAccounts[0].id;
+      select.value = options[0].id;
+      gaCurrentAccountId = options[0].id;
     }
     await onGaAccountChange();
     await loadSettingsTemplateSources();
     renderDevices();
+    // Keep the top Account dropdown (context strip) in sync when usernames change.
+    populateCtxAccountSelect();
   } catch (err) {
     setGaStatus(err.message, "error");
   }
@@ -6222,6 +6318,7 @@ function poolMediaSectionHtml(pool) {
       <div class="pool-video-list">${
         rows || '<p class="brand-pool-empty-members">No shared videos yet. Upload one to send it to all accounts in this pool.</p>'
       }</div>
+      <p class="brand-pool-empty-members" style="margin-top:6px">Uploads auto-set <code>post-reels</code> on every account to match the video count (locked accounts stay at 0).</p>
     </div>`;
 }
 
@@ -6314,6 +6411,8 @@ async function uploadPoolMedia(poolId, input) {
       if (data.skipped_existing?.length) parts.push(`${data.skipped_existing.length} already had it`);
       if (data.skipped_locked?.length) parts.push(`${data.skipped_locked.length} locked`);
       if (data.errors?.length) parts.push(`${data.errors.length} failed`);
+      const queue = data.post_reels_synced?.queue;
+      if (queue != null) parts.push(`post-reels set to ${queue}`);
       log(
         `“${data.filename}” → ${pool?.name || poolId}: ${parts.join(", ") || "no accounts"}`,
         data.errors?.length ? "error" : "success"
@@ -6347,7 +6446,10 @@ async function deletePoolMedia(poolId, filename) {
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "Delete failed");
     log(
-      `Deleted “${data.filename}” from ${data.deleted?.length || 0} account(s) in ${pool?.name || poolId}`,
+      `Deleted “${data.filename}” from ${data.deleted?.length || 0} account(s) in ${pool?.name || poolId}` +
+        (data.post_reels_synced?.queue != null
+          ? ` — post-reels set to ${data.post_reels_synced.queue}`
+          : ""),
       data.errors?.length ? "error" : "success"
     );
     if (gaPoolMedia[poolId]) gaPoolMedia[poolId].files = data.files || [];
@@ -6386,10 +6488,13 @@ async function togglePoolPosting(poolId, disable) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || "Failed to update posting setting");
     }
+    const data = await res.json().catch(() => ({}));
     if (pool) pool.posting_enabled = enabled;
     renderBrandPools();
+    const queue = data.post_reels_synced?.queue;
     log(
-      `Reel posting ${enabled ? "enabled" : "disabled"} for ${pool?.name || poolId} pool`
+      `Reel posting ${enabled ? "enabled" : "disabled"} for ${pool?.name || poolId} pool` +
+        (queue != null ? ` — post-reels set to ${queue}` : "")
     );
   } catch (err) {
     log(err.message, "error");
