@@ -122,6 +122,11 @@ class SessionState:
         # follows/likes/comments climbing in near-real-time (not just per job).
         self._publish_live_progress()
 
+    def register_pm(self) -> None:
+        """Count a sent DM and push live progress so Farm DMs-sent updates."""
+        self.totalPm = int(self.totalPm or 0) + 1
+        self._publish_live_progress()
+
     def register_story_like(self) -> None:
         """Count a story segment liked during normal profile interactions."""
         self.totalStoryLikes += 1
@@ -180,6 +185,15 @@ class SessionState:
         self.args.current_crashes_limit = get_value(
             self.args.total_crashes_limit, None, 5
         )
+        # Clamp to 24h Community Standards smart PM cap when active.
+        try:
+            from GramAddict.core.dm_limit_history import apply_smart_pm_limit_to_session
+
+            username = getattr(self.args, "username", None) or ""
+            if username:
+                apply_smart_pm_limit_to_session(username, self)
+        except Exception:
+            pass
 
     def check_limit(self, limit_type=None, output=False):
         """Returns True if limit reached - else False"""

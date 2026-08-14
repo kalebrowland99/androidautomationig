@@ -59,6 +59,7 @@ comment_carousels: true
 
 ## Filters for sending PM
 pm_to_private_or_empty: true
+pm_private_only: false
 
 ## Filters on number of post likers
 min_likers: 1

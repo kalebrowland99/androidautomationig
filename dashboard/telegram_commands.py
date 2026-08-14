@@ -52,6 +52,18 @@ FARM_SCREEN_WORDS = frozenset(
         "/mirror",
     }
 )
+DMS_WORDS = frozenset(
+    {
+        "dms",
+        "dm",
+        "inbox",
+        "messages",
+        "/dms",
+        "/dm",
+        "/inbox",
+        "/messages",
+    }
+)
 
 POLL_SECONDS = 4.0
 
@@ -342,6 +354,7 @@ def _build_help_reply(ai_enabled: bool = False) -> str:
         "• `status` or `update` — current progress\n"
         "• `status ACCOUNT` — one account only\n"
         "• `farm` / `screens` / `homepage` — Farm dashboard + phone screenshots\n"
+        "• `DMs` / `inbox` — pause bots, open DM inbox on all phones, send screenshot grid\n"
         f"{ai_line}"
         "• `help` — this message\n\n"
         "Turn off in dashboard → Reports → *Allow Telegram status commands*."
@@ -431,6 +444,79 @@ def _send_farm_screens(token: str, chat_id: str) -> None:
         )
 
 
+def _send_dm_inbox_screens(token: str, chat_id: str) -> None:
+    """Pause farm bots, open Direct inbox on each phone, then send a collage."""
+    telegram_bot_send_text(
+        token,
+        chat_id,
+        "Pausing bots and opening DM inboxes…",
+        parse_mode=None,
+    )
+    _send_chat_action(token, chat_id, "upload_photo")
+    try:
+        from dashboard.dm_inbox_command import capture_dm_inbox_collage
+
+        jpeg, collage_meta, nav = capture_dm_inbox_collage()
+    except Exception as exc:
+        telegram_bot_send_text(
+            token,
+            chat_id,
+            f"Couldn't open DM inboxes: {exc}",
+            parse_mode=None,
+        )
+        return
+
+    paused = nav.get("paused") or []
+    nav_ok = int(nav.get("ok") or 0)
+    nav_count = int(nav.get("count") or 0)
+    ok = int(collage_meta.get("ok") or 0)
+    count = int(collage_meta.get("count") or 0)
+    source = collage_meta.get("source") or nav.get("source") or "connected"
+    failures = collage_meta.get("failures") or []
+    nav_failures = [
+        r
+        for r in (nav.get("results") or [])
+        if isinstance(r, dict) and not r.get("ok")
+    ]
+
+    caption_parts = [
+        f"DM inbox ({nav_ok}/{nav_count} opened · {ok}/{count} screenshots)"
+    ]
+    if paused:
+        caption_parts.append(f"Paused {len(paused)} bot(s)")
+    if source == "farm_selection":
+        caption_parts.append("farm selection")
+    caption = " · ".join(caption_parts)
+
+    detail_bits: list[str] = []
+    if nav_failures:
+        names = ", ".join(
+            (r.get("username") or (r.get("serial") or "")[-8:] or "?")
+            for r in nav_failures[:6]
+        )
+        detail_bits.append(f"Inbox failed: {names}")
+    if failures:
+        failed_names = ", ".join(
+            (f.get("serial") or "")[-8:] for f in failures[:5] if isinstance(f, dict)
+        )
+        detail_bits.append(f"Shot failed: {failed_names}")
+    if detail_bits:
+        caption += "\n" + "\n".join(detail_bits)
+    caption += "\nRestart bots from the dashboard when you're done."
+
+    response = telegram_bot_send_photo(
+        token, chat_id, jpeg, caption=caption, parse_mode=None
+    )
+    if not response or not response.get("ok"):
+        error = (response or {}).get("description") or "unknown error"
+        telegram_bot_send_text(
+            token,
+            chat_id,
+            f"DM inbox photo send failed: {error}",
+            parse_mode=None,
+        )
+
+
 def _detailed_log_tail(username: str, *, max_lines: int = 45) -> list[str]:
     """Recent log lines with timestamps kept (for AI context, not chat replies)."""
     path = LOGS_DIR / f"{username}.log"
@@ -459,11 +545,14 @@ CAPABILITIES = (
     "accounts, watch stories, leave AI comments, send DMs, and post reels. "
     "Telegram commands: `status`/`update` (live progress), `status <account>` "
     "(one account), `farm`/`screens`/`homepage` (Farm dashboard top+bottom photo "
-    "plus woken phone screenshot grid), `help`. End-of-session Telegram summaries "
-    "are disabled. The owner can also ask free-form questions and this assistant "
-    "answers from the live status and logs below. If they ask for a screenshot of "
-    "the farm/phones/homepage/dashboard, tell them to text `farm` or `screens` "
-    "(you cannot attach photos yourself)."
+    "plus woken phone screenshot grid), `DMs`/`inbox` (pause running bots, open "
+    "Instagram Direct inbox on every farm phone, then send a screenshot grid), "
+    "`help`. End-of-session Telegram summaries are disabled. The owner can also "
+    "ask free-form questions and this assistant answers from the live status and "
+    "logs below. If they ask for a screenshot of the farm/phones/homepage/"
+    "dashboard, tell them to text `farm` or `screens`. If they want to check DM "
+    "inboxes across phones, tell them to text `DMs` or `inbox` (you cannot "
+    "attach photos yourself)."
 )
 
 
@@ -587,6 +676,16 @@ def _handle_message(listener: TelegramBotListener, message: dict[str, Any]) -> N
             )
             return
         _send_farm_screens(listener.token, chat_id)
+        return
+    elif command in DMS_WORDS:
+        if not status_enabled:
+            telegram_bot_send_text(
+                listener.token,
+                chat_id,
+                "Telegram status commands are disabled for this account.",
+            )
+            return
+        _send_dm_inbox_screens(listener.token, chat_id)
         return
     elif command in STATUS_WORDS:
         reply = _build_status_reply(matching, arg)

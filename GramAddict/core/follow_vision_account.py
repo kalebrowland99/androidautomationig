@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import io
 import logging
+import random
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -79,6 +80,38 @@ DEFAULT_COMMENT_PROMPT = (
     "\"need to shoot something soon 🔥\", \"lets create together soon\". "
     "Return only the comment text — no quotes, no hashtags, no extra words."
 )
+DEFAULT_PM_PROMPT = (
+    "Write one short Instagram cold DM in the SAME voice as our normal IG chats: "
+    "a 25-year-old wedding filmmaker, warm, curious, not salesy, not corporate. "
+    "Write like a real text, not an email. lowercase preferred. no dashes. "
+    "avoid periods (comma or ! instead). never curly quotes. "
+    "Core idea (keep this meaning): ask if they have found a wedding videographer yet, "
+    "and say you'd love to be considered if thats an option. "
+    "Anchor example: "
+    "\"hey! have you found a wedding videographer? i'd love to be considered if thats an option!\" "
+    "Vary the wording slightly each time but stay on that exact pitch — no congrats-only messages, "
+    "no mutual/found-you openers, no links, no prices, no long pitch. "
+    "One short message. ALWAYS include at least one exclamation mark (!). "
+    "Commas are fine. Return only the message text — no quotes, no hashtags."
+)
+
+_PM_VARIATION_HINTS = (
+    "Start with 'hey!'",
+    "Start with 'hi!'",
+    "Start with 'hey there!'",
+    "Ask 'have you found a wedding videographer yet?'",
+    "Ask 'have you already found a wedding videographer?'",
+    "Ask 'did you already find a wedding videographer?'",
+    "Say 'i'd love to be considered if thats an option!'",
+    "Say 'would love to be considered if thats still an option!'",
+    "Say 'i'd love to be considered if youre open to it!'",
+    "Keep it to two short beats.",
+    "all lowercase, like a real ig text",
+    "no title case, no 'Hey there! Did you already book'",
+    "End with a single !",
+    "Use !! once at the end.",
+    "Slightly warmer / softer, still the same pitch.",
+)
 
 # Number of near-full-screen down-swipes before the second screenshot.
 PROFILE_SCROLL_SWIPES = 2
@@ -136,6 +169,23 @@ def default_follow_vision_yml() -> dict[str, Any]:
         "log-videographers": True,
         "ai-comment-enabled": False,
         "ai-comment-prompt": DEFAULT_COMMENT_PROMPT,
+        "ai-pm-enabled": False,
+        "ai-pm-prompt": DEFAULT_PM_PROMPT,
+        "dm-inbox-reply-enabled": False,
+        "dm-inbox-reply-max-threads": 25,
+        "dm-inbox-reply-max-replies": 20,
+        # Peek past cold outbound threads buried unreplied leads (doesn't count as a "thread")
+        "dm-inbox-reply-max-peeks": 80,
+        "dm-inbox-reply-max-scrolls": 15,
+        # Pause before AI reply so ManyChat can fire; 0 = disabled
+        "dm-inbox-reply-manychat-wait-seconds": 10,
+        # Bump quiet wedding leads once after this many hours (0 = off)
+        "dm-inbox-followup-after-hours": 24,
+        "dm-inbox-followup-max-per-session": 8,
+        # Follow-back DMs at session start (before cold outreach).
+        # Enabled by default for the YLF brand pool unless set false here.
+        "dm-new-followers-max-per-session": 8,
+        "dm-new-followers-max-scrolls": 12,
         "vision-popup-dismiss": True,
     }
 
@@ -582,6 +632,115 @@ def generate_ai_comment(account_key: str) -> str:
     text = (response.choices[0].message.content or "").strip().strip('"').strip()
     if not text:
         raise RuntimeError("OpenAI returned empty comment")
+    return text
+
+
+def ai_pms_enabled(account_key: str) -> bool:
+    try:
+        settings = get_account_follow_vision(account_key)
+    except FileNotFoundError:
+        return False
+    return bool(settings.get("ai-pm-enabled"))
+
+
+def _normalize_cold_dm_text(text: str, *, casual: bool = False) -> str:
+    """Strip quotes/wrappers and collapse accidental duplicated paste/AI repeats."""
+    t = (text or "").strip().strip('"').strip("'").strip()
+    t = re.sub(r"\s+", " ", t).strip()
+    if not t:
+        return t
+    t = (
+        t.replace("\u2018", "'")
+        .replace("\u2019", "'")
+        .replace("\u201c", '"')
+        .replace("\u201d", '"')
+        .replace("\u2014", ",")
+        .replace("\u2013", ",")
+    )
+    t = re.sub(r"\s+-\s+", ", ", t)
+    # Exact 2x/3x concatenation with no separator
+    for n in (3, 2):
+        if len(t) >= 12 and len(t) % n == 0:
+            part = t[: len(t) // n]
+            if part and part * n == t:
+                t = part.strip()
+                break
+    # Same chunk repeated with spaces: "msg msg msg"
+    for n in (3, 2):
+        words = t.split()
+        if len(words) < n * 2 or len(words) % n != 0:
+            continue
+        chunk_len = len(words) // n
+        chunks = [
+            " ".join(words[i * chunk_len : (i + 1) * chunk_len]) for i in range(n)
+        ]
+        if chunks[0] and len(set(chunks)) == 1:
+            t = chunks[0]
+            break
+    if casual:
+        t = t.lower().strip()
+    if "!" not in t:
+        t = t.rstrip(".?") + "!"
+    return t
+
+
+def generate_ai_pm(account_key: str) -> str:
+    """Generate a short, casual Instagram DM via OpenAI."""
+    settings = get_account_follow_vision(account_key)
+    prompt = str(settings.get("ai-pm-prompt") or "").strip() or DEFAULT_PM_PROMPT
+    api_key = _openai_api_key(account_key)
+    if not api_key:
+        raise ValueError("openai-api-key not set in follow_vision.yml or post_reel.yml")
+
+    try:
+        from openai import OpenAI
+    except ImportError as exc:
+        raise RuntimeError("Install openai: pip install openai") from exc
+
+    hints = random.sample(_PM_VARIATION_HINTS, k=min(3, len(_PM_VARIATION_HINTS)))
+    variation = (
+        "Hard rules for THIS message:\n"
+        "- MUST ask about a wedding videographer and ask to be considered.\n"
+        "- MUST include at least one exclamation mark (! or !!).\n"
+        "- Write like our IG chats: lowercase, no dashes, no periods if you can help it.\n"
+        "- Do not write like an email (no 'Hey there! Did you already book…').\n"
+        "- Commas are allowed and encouraged for natural flow.\n"
+        "- Do not mention mutuals / congrats-only openers.\n"
+        "Variation for THIS message only:\n"
+        + "\n".join(f"- {h}" for h in hints)
+        + "\nWrite a fresh wording every time. Never output the same sentence twice."
+    )
+
+    client = OpenAI(api_key=api_key)
+    response = client.chat.completions.create(
+        model=VISION_MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You write tiny Instagram cold DMs for a 25-year-old wedding filmmaker. "
+                    "Same voice as a real IG chat: lowercase, warm, not salesy, not corporate. "
+                    "Every message asks if they have a wedding videographer yet and "
+                    "asks to be considered if thats an option. "
+                    "Every message MUST include at least one '!'. Commas are fine. "
+                    "Avoid periods and dashes. No curly quotes. "
+                    "Never repeat the same phrase twice in one reply. "
+                    "Return only one short message, nothing else."
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"{prompt}\n\n{variation}",
+            },
+        ],
+        max_tokens=80,
+        temperature=1.15,
+    )
+    text = _normalize_cold_dm_text(
+        response.choices[0].message.content or "", casual=True
+    )
+    if not text:
+        raise RuntimeError("OpenAI returned empty DM")
     return text
 
 

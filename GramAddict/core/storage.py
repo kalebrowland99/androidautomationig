@@ -147,6 +147,53 @@ class Storage:
         )
         return True, last_interaction
 
+    def refresh_interacted_users_from_disk(self) -> None:
+        """Reload shared brand-pool history so concurrent accounts see each other's DMs."""
+        if not self.brand_pool or not self.interacted_users_path:
+            return
+        if not os.path.isfile(self.interacted_users_path):
+            return
+        try:
+            with open(self.interacted_users_path, encoding="utf-8") as handle:
+                loaded = json.load(handle)
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.debug("Could not refresh shared pool history: %s", exc)
+            return
+        if not isinstance(loaded, dict):
+            return
+        # Keep in-memory dirty pm_sent flags if we already DMed this session.
+        for username, record in loaded.items():
+            if not isinstance(record, dict):
+                continue
+            existing = self.interacted_users.get(username)
+            if isinstance(existing, dict) and existing.get("pm_sent"):
+                record = dict(record)
+                record["pm_sent"] = True
+                if existing.get("pm_sent_by") and not record.get("pm_sent_by"):
+                    record["pm_sent_by"] = existing["pm_sent_by"]
+            self.interacted_users[username] = record
+
+    def user_was_pm_sent(self, username: str) -> bool:
+        """True if this username already got a DM (account-local or brand pool)."""
+        username = (username or "").strip().lstrip("@")
+        if not username:
+            return False
+        user = self.interacted_users.get(username)
+        return bool(isinstance(user, dict) and user.get("pm_sent"))
+
+    def pm_already_sent_reason(self, username: str) -> Optional[str]:
+        """Human-readable skip reason when a DM was already sent, else None."""
+        username = (username or "").strip().lstrip("@")
+        if not username or not self.user_was_pm_sent(username):
+            return None
+        user = self.interacted_users.get(username) or {}
+        by = str(user.get("pm_sent_by") or "").strip().lstrip("@")
+        if by:
+            return f"already DMed by @{by}"
+        if self.brand_pool:
+            return f"already DMed by brand pool '{self.brand_pool}'"
+        return "already DMed earlier"
+
     def can_comment_user(self, username, cooldown_days: Optional[Union[int, float]]) -> bool:
         """True when this user is outside the comment cooldown window."""
         if cooldown_days is None or cooldown_days <= 0:
@@ -243,6 +290,7 @@ class Storage:
         watched=0,
         commented=0,
         pm_sent=False,
+        pm_sent_by=None,
         job_name=None,
         target=None,
     ):
@@ -297,12 +345,14 @@ class Storage:
             if "scraped" not in user or user["scraped"] != scraped
             else user["scraped"]
         )
-        # Save the boolean if we sent a PM
-        user["pm_sent"] = (
-            pm_sent
-            if "pm_sent" not in user or user["pm_sent"] != pm_sent
-            else user["pm_sent"]
-        )
+        # Sticky: once a DM was sent (by any account in the pool), keep it True.
+        if pm_sent or user.get("pm_sent"):
+            user["pm_sent"] = True
+            sender = (pm_sent_by or user.get("pm_sent_by") or "").strip().lstrip("@")
+            if sender:
+                user["pm_sent_by"] = sender
+        else:
+            user["pm_sent"] = False
         self.interacted_users[username] = user
         self._pool_dirty_users.add(username)
         self._update_file()
@@ -347,8 +397,18 @@ class Storage:
                     )
                     merged = dict(self.interacted_users)
             for username in self._pool_dirty_users:
-                if username in self.interacted_users:
-                    merged[username] = self.interacted_users[username]
+                if username not in self.interacted_users:
+                    continue
+                new_rec = self.interacted_users[username]
+                old_rec = merged.get(username)
+                if isinstance(old_rec, dict) and isinstance(new_rec, dict):
+                    # Never let a later non-DM write erase another account's pm_sent.
+                    if old_rec.get("pm_sent") or new_rec.get("pm_sent"):
+                        new_rec = dict(new_rec)
+                        new_rec["pm_sent"] = True
+                        if old_rec.get("pm_sent_by") and not new_rec.get("pm_sent_by"):
+                            new_rec["pm_sent_by"] = old_rec["pm_sent_by"]
+                merged[username] = new_rec
             # Keep our in-memory view consistent with what's now on disk so later
             # reads (e.g. re-interaction checks) see other accounts' entries too.
             self.interacted_users = merged

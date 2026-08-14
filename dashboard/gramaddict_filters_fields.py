@@ -13,7 +13,7 @@ FILTER_FIELDS: dict[str, list[dict[str, Any]]] = {
         {"key": "skip_following", "label": "Skip people you already follow", "type": "bool"},
         {"key": "skip_follower", "label": "Skip people who follow you", "type": "bool"},
         {"key": "skip_if_link_in_bio", "label": "Skip if bio has a link", "type": "bool"},
-        {"key": "follow_private_or_empty", "label": "Only follow private or empty-bio accounts", "type": "bool"},
+        {"key": "follow_private_or_empty", "label": "Allow follow on private or empty profiles", "type": "bool"},
     ],
     "profile_stats_options": [
         {"key": "ignore_following_count", "label": "Ignore following count", "type": "bool"},
@@ -57,7 +57,11 @@ FILTER_FIELDS: dict[str, list[dict[str, Any]]] = {
         {"key": "comment_carousels", "label": "Allow comments on carousels", "type": "bool"},
     ],
     "pm_filters": [
-        {"key": "pm_to_private_or_empty", "label": "Only DM private or empty-bio accounts", "type": "bool"},
+        {
+            "key": "pm_to_private_or_empty",
+            "label": "Allow DMs to private or empty profiles",
+            "type": "bool",
+        },
     ],
     "post_likers": [
         {"key": "min_likers", "label": "Minimum likes on the post", "type": "text", "default": "1"},

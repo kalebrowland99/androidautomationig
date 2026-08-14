@@ -1133,6 +1133,7 @@ def create_account(name: str) -> dict[str, Any]:
                 "posts-per-day": 1,
                 "caption-prompt": (
                     "Write one short casual Instagram story caption. "
+                    "Exactly one sentence max. "
                     "Return only the caption text — no quotes, no hashtags."
                 ),
             },
@@ -2039,6 +2040,11 @@ def _empty_progress() -> dict[str, Any]:
         "story_accounts_liked": 0,
         "daily_story_likes": 0,
         "daily_story_likes_limit": None,
+        "pm": 0,
+        "pm_limit": None,
+        "dm_limited": False,
+        "smart_pm_cap": None,
+        "dm_limit_until": None,
         "current_job": None,
         "sleeping": False,
         "rate_limited": False,
@@ -2101,6 +2107,11 @@ def _live_progress_snapshot(username: str) -> Optional[dict[str, Any]]:
         "story_accounts_liked": data.get("total_story_accounts_liked", 0),
         "daily_story_likes": data.get("total_daily_story_accounts", 0),
         "daily_story_likes_limit": data.get("daily_story_likes_limit"),
+        "pm": data.get("total_pm", 0),
+        "pm_limit": limits.get("pm"),
+        "dm_limited": bool(data.get("dm_limited")),
+        "smart_pm_cap": data.get("smart_pm_cap"),
+        "dm_limit_until": data.get("dm_limit_until"),
         "current_job": data.get("current_job"),
         "sleeping": sleeping,
         "rate_limited": rate_limited,
@@ -2135,13 +2146,40 @@ def _enrich_today_progress(
         likes_on = _config_pct_enabled(cfg, "likes-percentage", default=True)
         follows_on = _config_pct_enabled(cfg, "follow-percentage", default=True)
         stories_on = _config_pct_enabled(cfg, "stories-percentage", default=False)
+        pm_on = _config_pct_enabled(cfg, "pm-percentage", default=False)
         # follow-after-story-like follows even when follow-percentage is 0.
         follow_after_story = bool(cfg.get("follow-after-story-like"))
         follows_on = follows_on or follow_after_story
         progress["likes_enabled"] = likes_on
         progress["follows_enabled"] = follows_on
         progress["stories_enabled"] = stories_on
+        progress["pm_enabled"] = pm_on
         progress["follow_after_story_like"] = follow_after_story
+
+        # Recover smart PM cap from history when live_progress is stale.
+        if not progress.get("dm_limited"):
+            try:
+                from GramAddict.core.dm_limit_history import (
+                    active_dm_limit_until,
+                    active_smart_pm_cap,
+                )
+
+                smart_cap = active_smart_pm_cap(username)
+                if smart_cap is not None:
+                    progress["dm_limited"] = True
+                    progress["smart_pm_cap"] = smart_cap
+                    progress["dm_limit_until"] = active_dm_limit_until(username)
+                    if progress.get("pm_limit") is None:
+                        progress["pm_limit"] = smart_cap
+                    else:
+                        try:
+                            progress["pm_limit"] = min(
+                                int(progress["pm_limit"]), int(smart_cap)
+                            )
+                        except (TypeError, ValueError):
+                            progress["pm_limit"] = smart_cap
+            except Exception:
+                pass
 
         live_today = progress.get("today")
         if isinstance(live_today, dict) and running:
@@ -2149,12 +2187,14 @@ def _enrich_today_progress(
             stories = int(live_today.get("story_likes") or 0)
             story_accounts = int(live_today.get("story_accounts_liked") or 0)
             follows = int(live_today.get("follows") or 0)
+            pm = int(live_today.get("pm") or 0)
         else:
             totals = today_totals_from_disk(username)
             likes = totals["likes"]
             stories = totals["story_likes"]
             story_accounts = totals.get("story_accounts_liked", 0)
             follows = totals["follows"]
+            pm = int(totals.get("pm") or 0)
             # Mid-session: finished sessions on disk + current live counters.
             if (
                 running
@@ -2167,12 +2207,14 @@ def _enrich_today_progress(
                 )
                 story_accounts += int(progress.get("story_accounts_liked") or 0)
                 follows += int(progress.get("follows") or 0)
+                pm += int(progress.get("pm") or 0)
 
         progress["today"] = {
             "likes": likes,
             "story_likes": stories,
             "story_accounts_liked": story_accounts,
             "follows": follows,
+            "pm": pm,
             # Don't show goals for actions the account isn't configured to do.
             "likes_goal": goals["likes"] if likes_on else None,
             "story_likes_goal": goals["stories"] if stories_on else None,

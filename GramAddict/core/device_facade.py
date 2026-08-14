@@ -675,8 +675,9 @@ class DeviceFacade:
                 y_offset = uniform(0.40, 0.60)
 
             elif mode == Location.CENTER:
-                x_offset = uniform(0.4, 0.6)
-                y_offset = uniform(0.15, 0.85)
+                # Tight center — avoid corner overlays (collab badge, pin).
+                x_offset = uniform(0.42, 0.58)
+                y_offset = uniform(0.42, 0.58)
 
             elif mode == Location.RIGHT:
                 x_offset = uniform(0.6, 0.85)

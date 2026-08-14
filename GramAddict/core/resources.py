@@ -45,6 +45,10 @@ class ResourceID:
         self.DIRECT_TEXT_MESSAGE_TEXT_VIEW = (
             f"{APP_ID}:id/direct_text_message_text_view"
         )
+        self.DIRECT_INBOX_NULL_STATE = f"{APP_ID}:id/direct_empty_view"
+        self.DIRECT_INBOX_SEARCH = f"{APP_ID}:id/row_inbox_search"
+        self.DIRECT_THREAD_TITLE = f"{APP_ID}:id/thread_title"
+        self.INBOX_DIRECTORY = f"{APP_ID}:id/inbox_directory"
         self.ECHO_TEXT = f"{APP_ID}:id/echo_text"
         self.FEED_INLINE_COMPOSER_BUTTON_TEXTVIEW = (
             f"{APP_ID}:id/feed_inline_composer_button_textview"
@@ -180,6 +184,7 @@ class ResourceID:
             f"{APP_ID}:id/row_feed_like_count_facepile_stub"
         )
         self.ROW_FEED_PHOTO_PROFILE_NAME = f"{APP_ID}:id/row_feed_photo_profile_name"
+        self.ROW_FEED_PHOTO_IMAGEVIEW = f"{APP_ID}:id/row_feed_photo_imageview"
         self.ROW_FEED_TEXTVIEW_LIKES = f"{APP_ID}:id/row_feed_textview_likes"
         self.ROW_FEED_VIEW_GROUP_BUTTONS = f"{APP_ID}:id/row_feed_view_group_buttons"
         self.ROW_HASHTAG_TEXTVIEW_TAG_NAME = (
@@ -297,7 +302,7 @@ class ResourceID:
 
 
 class TabBarText:
-    ACTIVITY_CONTENT_DESC = "Activity"
+    ACTIVITY_CONTENT_DESC = r"Activity|Notifications|News"
     EFFECTS_CONTENT_DESC = "Effects"
     HOME_CONTENT_DESC = "Home"
     IGTV_CONTENT_DESC = "IGTV"
@@ -308,6 +313,8 @@ class TabBarText:
     RECENT_CONTENT_DESC = "Recent"
     REELS_CONTENT_DESC = "Reels"
     SEARCH_CONTENT_DESC = "Search and Explore"
+    # Home action-bar paper-plane / inbox (content-desc varies by IG version/locale).
+    DIRECT_INBOX_CONTENT_DESC = "Direct|Inbox|Messages|Messenger|Message"
 
 
 class ClassName:

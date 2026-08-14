@@ -69,11 +69,19 @@ def _strip_emojis(text: str) -> str:
 
 
 def normalize_reel_caption(text: str) -> str:
-    """One human sentence + fixed Nashville hashtags; no emojis."""
+    """One human sentence max + fixed Nashville hashtags; no emojis."""
     cleaned = _strip_emojis(text or "")
     cleaned = cleaned.replace('"', "").replace("“", "").replace("”", "")
     # Drop any model-generated hashtags; we append the required ones.
     cleaned = HASHTAG_RE.sub("", cleaned)
+    # First non-empty line only (models sometimes return paragraphs).
+    for line in cleaned.splitlines():
+        line = line.strip()
+        if line:
+            cleaned = line
+            break
+    else:
+        cleaned = ""
     cleaned = re.sub(r"[ \t]+", " ", cleaned).strip()
     # Keep only the first sentence.
     parts = re.split(r"(?<=[.!?])\s+", cleaned)
@@ -227,14 +235,14 @@ def generate_caption(account_id: str, *, batch: Optional[str] = None) -> str:
             {
                 "role": "system",
                 "content": (
-                    "You write short Instagram Reel captions that sound human, "
-                    "never AI. Exactly one sentence. No emojis. No hashtags. "
-                    "No quotation marks. Return only the sentence."
+                    "You write Instagram Reel captions that sound human, never AI. "
+                    "Exactly one sentence maximum — never two. No emojis. No hashtags. "
+                    "No quotation marks. Return only that single sentence."
                 ),
             },
             {"role": "user", "content": prompt},
         ],
-        max_tokens=120,
+        max_tokens=60,
     )
     text = (response.choices[0].message.content or "").strip()
     if not text:

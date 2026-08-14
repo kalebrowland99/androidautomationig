@@ -70,6 +70,7 @@ def _empty_totals() -> dict[str, int]:
         "unfollows": 0,
         "comments": 0,
         "watched": 0,
+        "pm": 0,
     }
 
 
@@ -85,6 +86,7 @@ def _add_session_counts(totals: dict[str, int], session: dict[str, Any]) -> None
     totals["follows"] += int(session.get("total_followed", 0) or 0)
     totals["unfollows"] += int(session.get("total_unfollowed", 0) or 0)
     totals["comments"] += int(session.get("total_comments", 0) or 0)
+    totals["pm"] += int(session.get("total_pm", 0) or 0)
 
 
 def today_action_totals(
@@ -129,6 +131,7 @@ def today_action_totals(
                 getattr(current_session, "totalUnfollowed", 0) or 0
             )
             totals["comments"] += int(getattr(current_session, "totalComments", 0) or 0)
+            totals["pm"] += int(getattr(current_session, "totalPm", 0) or 0)
 
     return totals
 

@@ -66,7 +66,10 @@ CONFIG_HELP: dict[str, str] = {
     "carousel-percentage": "How often to swipe through carousel posts.",
     "max-comments-pro-user": "Cap comments on a single person’s posts per session.",
     "comment-percentage": "How often to leave a comment (needs templates under Comments & PM).",
-    "pm-percentage": "How often to send a DM (needs templates under Comments & PM).",
+    "pm-percentage": (
+        "How often to send a DM when visiting a profile (needs AI DMs or templates under Comments & PM). "
+        "Pair with Filters → Only DM private accounts for private-only messaging."
+    ),
     "interact-percentage": "When browsing hashtag feeds, how often to tap into a post’s author.",
     "follow-percentage": "How often to follow someone after visiting their profile.",
     "follow-limit": "Maximum follows allowed per target (per hashtag, account, etc.) in one session.",
@@ -106,13 +109,16 @@ CONFIG_HELP: dict[str, str] = {
 
 FILTER_HELP: dict[str, str] = {
     "skip_if_private": "Skip profiles that are private.",
-    "skip_if_public": "Skip profiles that are public.",
+    "skip_if_public": "Skip profiles that are public (only visit private accounts).",
     "skip_business": "Skip business accounts.",
     "skip_non_business": "Skip personal (non-business) accounts.",
     "skip_following": "Skip people you already follow.",
     "skip_follower": "Skip people who already follow you.",
     "skip_if_link_in_bio": "Skip profiles that have a link in their bio.",
-    "follow_private_or_empty": "Only follow private accounts or accounts with an empty bio.",
+    "follow_private_or_empty": (
+        "Allow following private (or empty) profiles. For private-only DMs, turn this on "
+        "so the bot can send a follow request before the DM."
+    ),
     "ignore_following_count": "Do not skip profiles based on how many accounts they follow.",
     "ignore_potency": "Do not skip profiles based on follower ratio (followers ÷ following).",
     "min_followers": "Skip accounts with fewer than this many followers.",
@@ -146,7 +152,16 @@ FILTER_HELP: dict[str, str] = {
     "comment_photos": "Allow comments on photo posts.",
     "comment_videos": "Allow comments on video posts.",
     "comment_carousels": "Allow comments on carousel (multi-photo) posts.",
-    "pm_to_private_or_empty": "Only send DMs to private accounts or accounts with an empty bio.",
+    "pm_to_private_or_empty": (
+        "Allow sending DMs when the profile is private or has 0 posts. "
+        "Required to message locked accounts. "
+        "To skip DMing public profiles, use Posting → Skip DMing public accounts "
+        "(next to the AI DM prompt)."
+    ),
+    "pm_private_only": (
+        "Runtime flag in filters.yml. Prefer Posting → Skip DMing public accounts "
+        "next to the AI DM prompt — visits public profiles but does not DM them."
+    ),
     "min_likers": "When using post-likers jobs, skip posts with fewer than this many likes.",
     "max_likers": "When using post-likers jobs, skip posts with more than this many likes.",
 }
@@ -154,7 +169,11 @@ FILTER_HELP: dict[str, str] = {
 TELEGRAM_HELP: dict[str, str] = {
     "telegram-api-token": "Token from @BotFather on Telegram. Creates the bot that sends you reports.",
     "telegram-chat-id": "Your chat ID from @myidbot — where the bot sends session summaries.",
-    "telegram-status-commands": "Reply when you text status, update, or farm/screens (phone screenshot grid) in Telegram. Requires the dashboard to be running.",
+    "telegram-status-commands": (
+        "Reply when you text status, update, farm/screens, or DMs/inbox "
+        "(pause bots, open Direct inbox, screenshot grid) in Telegram. "
+        "Requires the dashboard to be running."
+    ),
     "telegram-ai-assistant": "Ask the bot anything in Telegram (e.g. 'how's progress?', 'why did it stop?') and an AI answers using the live status and logs. Reuses the account's OpenAI key (from follow_vision.yml or post_reel.yml). Requires the dashboard to be running.",
     "telegram-alerts": "Message you immediately when Instagram blocks an action or the bot hits a fatal error.",
 }
@@ -166,7 +185,10 @@ FILE_HELP: dict[str, str] = {
     "unfollow_list.txt": "Usernames to unfollow — used by the unfollow job and debug steps (one per line).",
     "remove_list.txt": "Followers to remove — used by the remove job and debug steps (one per line).",
     "comments_list.txt": "Comment templates grouped by post type. The bot picks one at random when it leaves a comment.",
-    "pm_list.txt": "DM templates — one per line. The bot picks one at random when it sends a message.",
+    "pm_list.txt": (
+        "DM templates — one per line (supports spintax). Used when AI DMs are off, "
+        "or as fallback if AI generation fails."
+    ),
     "filters.yml": "Rules for which profiles to skip or allow (followers, bio words, business accounts, etc.).",
     "telegram.yml": "Telegram bot token and chat ID for session report messages.",
     "config.yml": "Main bot settings: jobs, limits, schedule, and behavior for this Instagram account.",

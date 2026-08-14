@@ -674,6 +674,16 @@ function progressLimitsHtml(acct, acctRunning) {
       );
       parts.push(countPart("Story Accounts", p.story_accounts_liked));
     }
+    if (showMetric(p.pm_enabled)) {
+      const pmLim =
+        p.smart_pm_cap != null && p.smart_pm_cap !== ""
+          ? Math.min(p.pm_limit ?? p.smart_pm_cap, p.smart_pm_cap)
+          : p.pm_limit;
+      parts.push(part("DMs sent", p.pm, pmLim));
+      if (p.dm_limited) {
+        parts.push("DM limit");
+      }
+    }
     if (showMetric(p.follows_enabled)) {
       parts.push(followedPart(p.follows, p.follows_limit));
     }
@@ -704,6 +714,9 @@ function progressLimitsHtml(acct, acctRunning) {
     if (showMetric(p.stories_enabled)) {
       todayParts.push(part("Liked Stories", t.story_likes, t.story_likes_goal));
       todayParts.push(countPart("Story Accounts", t.story_accounts_liked));
+    }
+    if (showMetric(p.pm_enabled)) {
+      todayParts.push(countPart("DMs sent", t.pm));
     }
     if (showMetric(p.follows_enabled)) {
       todayParts.push(followedPart(t.follows, t.follows_goal));

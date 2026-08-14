@@ -332,6 +332,17 @@ def interact(
     target,
     on_interaction,
 ):
+    # Shared brand-pool history: if any account already DMed them, skip entirely.
+    if storage is not None:
+        storage.refresh_interacted_users_from_disk()
+        pm_reason = storage.pm_already_sent_reason(username)
+        if pm_reason:
+            logger.info(
+                f"@{username}: {pm_reason}. Skip.",
+                extra={"color": f"{Fore.CYAN}"},
+            )
+            return True
+
     can_follow = False
     if is_follow_limit_reached is not None:
         can_follow = not is_follow_limit_reached() and storage.get_following_status(
@@ -367,6 +378,7 @@ def interact(
         watched=number_of_watched,
         commented=number_of_comments,
         pm_sent=pm_sent,
+        pm_sent_by=session_state.my_username if pm_sent else None,
     )
     return on_interaction(
         succeed=interaction_succeed,
@@ -592,22 +604,29 @@ def handle_blogger_from_file(
                     if storage.is_user_in_blacklist(username):
                         logger.info(f"@{username} is in blacklist. Skip.")
                     else:
-                        (
-                            interacted,
-                            interacted_when,
-                        ) = storage.check_user_was_interacted(username)
-                        if interacted:
-                            can_reinteract = storage.can_be_reinteract(
-                                interacted_when,
-                                get_value(self.args.can_reinteract_after, None, 0),
-                            )
+                        pm_reason = storage.pm_already_sent_reason(username)
+                        if pm_reason:
                             logger.info(
-                                f"@{username}: already interacted on {interacted_when:%Y/%m/%d %I:%M:%S %p}. {'Interacting again now' if can_reinteract else 'Skip'}."
+                                f"@{username}: {pm_reason}. Skip.",
+                                extra={"color": f"{Fore.CYAN}"},
                             )
-                            if can_reinteract:
-                                can_interact = True
                         else:
-                            can_interact = True
+                            (
+                                interacted,
+                                interacted_when,
+                            ) = storage.check_user_was_interacted(username)
+                            if interacted:
+                                can_reinteract = storage.can_be_reinteract(
+                                    interacted_when,
+                                    get_value(self.args.can_reinteract_after, None, 0),
+                                )
+                                logger.info(
+                                    f"@{username}: already interacted on {interacted_when:%Y/%m/%d %I:%M:%S %p}. {'Interacting again now' if can_reinteract else 'Skip'}."
+                                )
+                                if can_reinteract:
+                                    can_interact = True
+                            else:
+                                can_interact = True
 
                     if not can_interact:
                         continue
@@ -1890,23 +1909,31 @@ def iterate_over_followers(
                         if storage.is_user_in_blacklist(username):
                             logger.info(f"@{username} is in blacklist. Skip.")
                         else:
-                            interacted, interacted_when = storage.check_user_was_interacted(
-                                username
-                            )
-                            if interacted:
-                                can_reinteract = storage.can_be_reinteract(
-                                    interacted_when,
-                                    get_value(self.args.can_reinteract_after, None, 0),
-                                )
+                            pm_reason = storage.pm_already_sent_reason(username)
+                            if pm_reason:
                                 logger.info(
-                                    f"@{username}: already interacted on {interacted_when:%Y/%m/%d %I:%M:%S %p}. {'Interacting again now' if can_reinteract else 'Skip'}."
+                                    f"@{username}: {pm_reason}. Skip.",
+                                    extra={"color": f"{Fore.CYAN}"},
                                 )
-                                if can_reinteract:
-                                    can_interact = True
-                                else:
-                                    screen_skipped_followers_count += 1
+                                screen_skipped_followers_count += 1
                             else:
-                                can_interact = True
+                                interacted, interacted_when = storage.check_user_was_interacted(
+                                    username
+                                )
+                                if interacted:
+                                    can_reinteract = storage.can_be_reinteract(
+                                        interacted_when,
+                                        get_value(self.args.can_reinteract_after, None, 0),
+                                    )
+                                    logger.info(
+                                        f"@{username}: already interacted on {interacted_when:%Y/%m/%d %I:%M:%S %p}. {'Interacting again now' if can_reinteract else 'Skip'}."
+                                    )
+                                    if can_reinteract:
+                                        can_interact = True
+                                    else:
+                                        screen_skipped_followers_count += 1
+                                else:
+                                    can_interact = True
 
                         if can_interact:
                             logger.info(

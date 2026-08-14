@@ -39,6 +39,7 @@ FIELD_MIN_POTENCY_RATIO = "min_potency_ratio"
 FIELD_MAX_POTENCY_RATIO = "max_potency_ratio"
 FIELD_FOLLOW_PRIVATE_OR_EMPTY = "follow_private_or_empty"
 FIELD_PM_TO_PRIVATE_OR_EMPTY = "pm_to_private_or_empty"
+FIELD_PM_PRIVATE_ONLY = "pm_private_only"
 FIELD_COMMENT_PHOTOS = "comment_photos"
 FIELD_COMMENT_VIDEOS = "comment_videos"
 FIELD_COMMENT_CAROUSELS = "comment_carousels"
@@ -354,7 +355,7 @@ class Filter:
             f"This account is {'private' if profile_data.is_private else 'public'}."
         )
 
-        if profile_data.is_private and field_skip_if_public:
+        if (not profile_data.is_private) and field_skip_if_public:
             logger.info(
                 f"@{username} has public account and you want to interact only private, skip.",
                 extra={"color": f"{Fore.CYAN}"},
@@ -482,13 +483,23 @@ class Filter:
             )
 
         if field_min_posts is not None and field_min_posts > profile_data.posts_count:
-            logger.info(
-                f"@{username} doesn't have enough posts ({profile_data.posts_count}), skip.",
-                extra={"color": f"{Fore.CYAN}"},
-            )
-            return profile_data, self.return_check_profile(
-                username, profile_data, SkipReason.NOT_ENOUGH_POSTS
-            )
+            # Private grids often report 0 posts; still allow when DM-to-private is on.
+            if profile_data.is_private and (
+                bool(self.conditions.get(FIELD_PM_PRIVATE_ONLY, False))
+                or bool(self.conditions.get(FIELD_PM_TO_PRIVATE_OR_EMPTY, False))
+            ):
+                logger.debug(
+                    f"@{username} is private with {profile_data.posts_count} posts — "
+                    "skipping min_posts check (DM-to-private enabled)."
+                )
+            else:
+                logger.info(
+                    f"@{username} doesn't have enough posts ({profile_data.posts_count}), skip.",
+                    extra={"color": f"{Fore.CYAN}"},
+                )
+                return profile_data, self.return_check_profile(
+                    username, profile_data, SkipReason.NOT_ENOUGH_POSTS
+                )
 
         cleaned_biography = " ".join(
             emoji.get_emoji_regexp()
@@ -661,6 +672,33 @@ class Filter:
             field_pm_to_private_or_empty
         )
 
+    def pm_private_only(self) -> bool:
+        """When True, only private profiles may receive DMs (public never)."""
+        if self.conditions is None:
+            return False
+        return bool(self.conditions.get(FIELD_PM_PRIVATE_ONLY, False))
+
+    def allows_pm(self, is_private: bool, posts_count: int) -> bool:
+        """Whether filter settings allow attempting a DM on this profile.
+
+        - ``pm_private_only``: DMs only when the account is private.
+        - ``pm_to_private_or_empty``: allow DMs on private or 0-post profiles.
+        - Public profiles with posts: allowed unless ``pm_private_only``.
+        """
+        if self.conditions is None:
+            return False
+        private_only = self.pm_private_only()
+        allow_private_or_empty = self.can_pm_to_private_or_empty()
+
+        if is_private:
+            # private-only mode implies we want to DM privates
+            return allow_private_or_empty or private_only
+        if private_only:
+            return False
+        if posts_count == 0:
+            return allow_private_or_empty
+        return True
+
     def should_skip_story_like(
         self, username: Optional[str], display_name: Optional[str] = None
     ) -> Optional[str]:
@@ -668,6 +706,21 @@ class Filter:
         if self.conditions is None:
             return None
         keywords = self.conditions.get(FIELD_SKIP_STORY_LIKE) or []
+        if isinstance(keywords, str):
+            keywords = [keywords]
+        return match_skip_story_like_keyword(username, display_name, keywords)
+
+    def should_skip_dm_by_name(
+        self, username: Optional[str], display_name: Optional[str] = None
+    ) -> Optional[str]:
+        """Skip DMs to businesses: match blacklist_words_name in @handle or display name.
+
+        Uses the same compact substring matching as skip_story_like so
+        'photo' hits Miley_Photography / lrow.photography / etc.
+        """
+        if self.conditions is None:
+            return None
+        keywords = self.conditions.get(FIELD_BLACKLIST_WORDS_NAME) or []
         if isinstance(keywords, str):
             keywords = [keywords]
         return match_skip_story_like_keyword(username, display_name, keywords)

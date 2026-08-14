@@ -1,1 +1,21 @@
-{enabled: false, prompt-batch: YourLoveFilms, ai-comment-enabled: true, ai-comment-prompt: 'Write one very short, casual Instagram comment, choose between these exactly you can add an extra letter or period for variation. "yesssss!", "gorgggg", "yesss, "gorgg". Return only the comment text — no quotes, no hashtags, no extra words.', log-tn-videographers: true, log-videographers: true, vision-popup-dismiss: true}
+enabled: false
+prompt-batch: YourLoveFilms
+ai-comment-enabled: true
+ai-comment-prompt: Write one very short, casual Instagram comment, choose between
+  these exactly you can add an extra letter or period for variation. "yesssss!", "gorgggg",
+  "yesss, "gorgg". Return only the comment text — no quotes, no hashtags, no extra
+  words.
+log-tn-videographers: true
+log-videographers: true
+vision-popup-dismiss: true
+ai-pm-enabled: true
+ai-pm-prompt: 'Write one short Instagram cold DM in the same voice as our normal IG chats: a 25-year-old wedding filmmaker, warm, not salesy. Write like a real text, not an email. lowercase preferred. no dashes. avoid periods (comma or !). Core idea (keep this meaning): ask if they have found a wedding videographer yet, and say you''d love to be considered if thats an option. Anchor example: "hey! have you found a wedding videographer? i''d love to be considered if thats an option!" Vary the wording slightly each time but stay on that exact pitch — no congrats-only messages, no mutual/found-you openers, no links, no prices, no long pitch. One short message. ALWAYS include at least one exclamation mark (!). Commas are fine. Return only the message text — no quotes, no hashtags.'
+dm-inbox-reply-enabled: true
+dm-new-followers-enabled: true
+dm-new-followers-max-per-session: 8
+dm-new-followers-max-scrolls: 12
+dm-inbox-reply-max-threads: 25
+dm-inbox-reply-max-replies: 20
+dm-inbox-reply-max-peeks: 80
+dm-inbox-reply-max-scrolls: 15
+dm-inbox-reply-manychat-wait-seconds: 10

@@ -4,4 +4,4 @@ accounts: [shorts.yourlovefilms, reel.yourlovefilms, clipped.yourlovefilms, clip
   reeels.yourlovefilms, wedding.yourlovefilms, hey.yourlovefilms, hello.yourlovefilms,
   hi.yourlovefilms, some.yourlovefilms, filming.yourlovefilms, Film.yourlovefilms,
   Films.yourlovefilms, yourlovefilms]
-posting-enabled: false
+posting-enabled: true

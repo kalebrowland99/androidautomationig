@@ -167,6 +167,22 @@ def _progress_lines(acct: Optional[dict[str, Any]]) -> list[str]:
                 f"Liked Stories {stories}" + (f"/{stories_lim}" if stories_lim else "")
             )
         parts.append(f"Story Accounts {p.get('story_accounts_liked') or 0}")
+        if p.get("pm_enabled") is not False and (
+            p.get("pm") or p.get("pm_limit") or p.get("dm_limited")
+        ):
+            pm = p.get("pm") or 0
+            pm_lim = p.get("pm_limit")
+            smart = p.get("smart_pm_cap")
+            if smart is not None and pm_lim is not None:
+                try:
+                    pm_lim = min(int(pm_lim), int(smart))
+                except (TypeError, ValueError):
+                    pm_lim = smart
+            elif smart is not None:
+                pm_lim = smart
+            parts.append(f"DMs sent {pm}" + (f"/{pm_lim}" if pm_lim is not None else ""))
+            if p.get("dm_limited"):
+                parts.append("DM limit")
         if follows or p.get("follows_limit"):
             parts.append(
                 f"Followed {follows}"
@@ -188,6 +204,8 @@ def _progress_lines(acct: Optional[dict[str, Any]]) -> list[str]:
                 + (f"/{today['story_likes_goal']}" if today.get("story_likes_goal") else "")
             )
         t_parts.append(f"Story Accounts {today.get('story_accounts_liked') or 0}")
+        if today.get("pm") is not None:
+            t_parts.append(f"DMs sent {today.get('pm') or 0}")
         if today.get("follows") is not None or today.get("follows_goal"):
             t_parts.append(
                 f"Followed {today.get('follows') or 0}"

@@ -270,55 +270,95 @@ def interact_with_user(
     if profile_data.is_private or (profile_data.posts_count == 0):
         private_empty = "Private" if profile_data.is_private else "Empty"
         logger.info(f"{private_empty} account.")
-        if (
-            pm_percentage != 0
-            and can_send_PM(session_state, pm_percentage)
-            and profile_filter.can_pm_to_private_or_empty
-        ):
-            sent_pm = _send_PM(
-                device, session_state, my_username, 0, profile_data.is_private
-            )
-            if sent_pm:
-                interacted = True
         can_follow_private_or_empty = profile_filter.can_follow_private_or_empty()
-        if can_follow and can_follow_private_or_empty:
+
+        # Private only: follow first (request), then DM — order matters for IG UX.
+        if profile_data.is_private and can_follow and can_follow_private_or_empty:
             if scraping_file is None:
                 followed = _follow(
                     device, username, follow_percentage, args, session_state, 0
                 )
                 if followed:
                     interacted = True
-                return (
-                    interacted,
-                    followed,
-                    profile_data.is_private,
-                    scraped,
-                    sent_pm,
-                    number_of_liked,
-                    number_of_watched,
-                    number_of_commented,
+        elif profile_data.is_private and not can_follow_private_or_empty:
+            logger.info(
+                "follow_private_or_empty is disabled in filters — not following before DM.",
+                extra={"color": f"{Fore.GREEN}"},
+            )
+        elif profile_data.is_private and can_follow_private_or_empty and not can_follow:
+            logger.info(
+                "Follow not allowed this time (limit or percentage) — continuing to DM.",
+                extra={"color": f"{Fore.GREEN}"},
+            )
+
+        if (
+            pm_percentage != 0
+            and can_send_PM(session_state, pm_percentage)
+            and profile_filter.allows_pm(
+                bool(profile_data.is_private), int(profile_data.posts_count or 0)
+            )
+            and not _already_pm_sent(storage, username)
+        ):
+            biz_hit = None
+            try:
+                biz_hit = profile_filter.should_skip_dm_by_name(
+                    username, getattr(profile_data, "fullname", None)
                 )
-        else:
-            if not can_follow_private_or_empty:
+            except Exception:
+                biz_hit = None
+            if biz_hit:
                 logger.info(
-                    "follow_private_or_empty is disabled in filters. Skip.",
-                    extra={"color": f"{Fore.GREEN}"},
+                    f"@{username}: skip DM — business keyword '{biz_hit}' "
+                    "in name/handle.",
+                    extra={"color": f"{Fore.CYAN}"},
                 )
             else:
-                logger.info(
-                    "Your follow-percentage is not 100%, not following this time. Skip.",
-                    extra={"color": f"{Fore.GREEN}"},
+                sent_pm = _send_PM(
+                    device, session_state, my_username, 0, profile_data.is_private
                 )
-            return (
-                interacted,
-                followed,
-                profile_data.is_private,
-                scraped,
-                sent_pm,
-                number_of_liked,
-                number_of_watched,
-                number_of_commented,
+                if sent_pm:
+                    interacted = True
+        elif (
+            pm_percentage != 0
+            and profile_filter.pm_private_only()
+            and not profile_data.is_private
+        ):
+            logger.info(
+                "pm_private_only enabled — skipping DM on empty/public account.",
+                extra={"color": f"{Fore.GREEN}"},
             )
+        elif pm_percentage != 0 and _already_pm_sent(storage, username):
+            reason = (
+                storage.pm_already_sent_reason(username)
+                if storage is not None
+                else "already DMed earlier"
+            )
+            logger.info(
+                f"@{username}: {reason}. Skip DM.",
+                extra={"color": f"{Fore.CYAN}"},
+            )
+        elif (
+            pm_percentage != 0
+            and (profile_data.is_private or profile_data.posts_count == 0)
+            and not profile_filter.allows_pm(
+                bool(profile_data.is_private), int(profile_data.posts_count or 0)
+            )
+        ):
+            logger.info(
+                "DMs to private/empty are disabled in filters. Skip.",
+                extra={"color": f"{Fore.GREEN}"},
+            )
+
+        return (
+            interacted,
+            followed,
+            profile_data.is_private,
+            scraped,
+            sent_pm,
+            number_of_liked,
+            number_of_watched,
+            number_of_commented,
+        )
 
     # handle the scraping mode
     if scraping_file is not None:
@@ -530,10 +570,42 @@ def interact_with_user(
             device.back()
 
     if pm_percentage != 0 and can_send_PM(session_state, pm_percentage):
-        sent_pm = _send_PM(device, session_state, my_username, swipe_amount)
-        swipe_amount = 0
-        if sent_pm:
-            interacted = True
+        if _already_pm_sent(storage, username):
+            reason = (
+                storage.pm_already_sent_reason(username)
+                if storage is not None
+                else "already DMed earlier"
+            )
+            logger.info(
+                f"@{username}: {reason}. Skip DM.",
+                extra={"color": f"{Fore.CYAN}"},
+            )
+        elif profile_filter.allows_pm(
+            bool(profile_data.is_private), int(profile_data.posts_count or 0)
+        ):
+            biz_hit = None
+            try:
+                biz_hit = profile_filter.should_skip_dm_by_name(
+                    username, getattr(profile_data, "fullname", None)
+                )
+            except Exception:
+                biz_hit = None
+            if biz_hit:
+                logger.info(
+                    f"@{username}: skip DM — business keyword '{biz_hit}' "
+                    "in name/handle.",
+                    extra={"color": f"{Fore.CYAN}"},
+                )
+            else:
+                sent_pm = _send_PM(device, session_state, my_username, swipe_amount)
+                swipe_amount = 0
+                if sent_pm:
+                    interacted = True
+        elif profile_filter.pm_private_only():
+            logger.info(
+                "pm_private_only enabled — skipping DM on public account.",
+                extra={"color": f"{Fore.GREEN}"},
+            )
     if can_follow:
         followed = _follow(
             device,
@@ -563,6 +635,145 @@ def can_send_PM(session_state: SessionState, pm_percentage: int) -> bool:
     return not session_state.check_limit(
         limit_type=session_state.Limit.PM, output=True
     ) and (pm_chance <= pm_percentage)
+
+
+def _already_pm_sent(storage, username: str) -> bool:
+    if storage is None:
+        return False
+    try:
+        storage.refresh_interacted_users_from_disk()
+        return bool(storage.user_was_pm_sent(username))
+    except Exception:
+        return False
+
+
+# Soft: this recipient won't accept DMs.
+# Hard: account-level Community Standards / can't send at this time.
+# Request limit: daily cap on new DMs to people who don't follow you
+# ("You've reached the message request limit" — no composer).
+_PM_SOFT_BLOCK_TEXT = (
+    "can't message this account|"
+    "cannot message this account|"
+    "unless they follow you|"
+    "only message people who follow|"
+    "you can only send messages to people|"
+    "messaging is unavailable|"
+    "isn't accepting messages|"
+    "not accepting messages"
+)
+_PM_HARD_BLOCK_TEXT = (
+    "can't send messages at this time|"
+    "cannot send messages at this time|"
+    "certain actions may be limited|"
+    "community standards|"
+    "learn more in account status"
+)
+_PM_REQUEST_LIMIT_TEXT = (
+    "you've reached the message request limit|"
+    "you have reached the message request limit|"
+    "reached the message request limit|"
+    "message request limit|"
+    "limit to the number of conversations|"
+    "conversations that you can start each day|"
+    "people who don't follow you"
+)
+
+
+def _pm_block_kind(device) -> Optional[str]:
+    """Return block kind: ``request_limit``, ``hard``, ``soft``, or None."""
+    try:
+        req = device.find(textMatches=case_insensitive_re(_PM_REQUEST_LIMIT_TEXT))
+        if req is not None and req.exists(Timeout.SHORT):
+            return "request_limit"
+        req_desc = device.find(
+            descriptionMatches=case_insensitive_re(_PM_REQUEST_LIMIT_TEXT)
+        )
+        if req_desc is not None and req_desc.exists(Timeout.TINY):
+            return "request_limit"
+
+        hard = device.find(textMatches=case_insensitive_re(_PM_HARD_BLOCK_TEXT))
+        if hard is not None and hard.exists(Timeout.SHORT):
+            return "hard"
+        hard_desc = device.find(
+            descriptionMatches=case_insensitive_re(_PM_HARD_BLOCK_TEXT)
+        )
+        if hard_desc is not None and hard_desc.exists(Timeout.TINY):
+            return "hard"
+
+        soft = device.find(textMatches=case_insensitive_re(_PM_SOFT_BLOCK_TEXT))
+        if soft is not None and soft.exists(Timeout.SHORT):
+            return "soft"
+        soft_desc = device.find(
+            descriptionMatches=case_insensitive_re(_PM_SOFT_BLOCK_TEXT)
+        )
+        if soft_desc is not None and soft_desc.exists(Timeout.TINY):
+            return "soft"
+    except Exception:
+        return None
+    return None
+
+
+def _pm_messaging_blocked(device) -> bool:
+    """True when Instagram shows a restriction instead of a DM composer."""
+    return _pm_block_kind(device) is not None
+
+
+def _handle_pm_restriction(
+    device,
+    universal_actions,
+    session_state: SessionState,
+    my_username: str,
+    *,
+    kind: Optional[str] = None,
+) -> None:
+    """Back out of restriction UI; on account-level blocks, freeze PMs for 24h."""
+    resolved = kind or _pm_block_kind(device)
+    if resolved in ("hard", "request_limit"):
+        event_kind = (
+            "message_request_limit"
+            if resolved == "request_limit"
+            else "community_standards"
+        )
+        if resolved == "request_limit":
+            logger.warning(
+                "Instagram message request limit (daily new-DM cap) — "
+                "no composer. Freezing PMs + smart cap for 24h.",
+            )
+        else:
+            logger.warning(
+                "Instagram DM limit (Community Standards) — "
+                "recording + smart PM cap for 24h.",
+            )
+        try:
+            from GramAddict.core.dm_limit_history import record_dm_limit_event
+
+            record_dm_limit_event(my_username, session_state, kind=event_kind)
+        except Exception as exc:
+            logger.debug("Could not record DM limit event: %s", exc)
+            try:
+                from GramAddict.core.dm_limit_history import freeze_session_pm_limit
+
+                freeze_session_pm_limit(session_state)
+            except Exception:
+                pass
+    elif resolved == "soft":
+        logger.info(
+            "Can't message this account (they must follow you first) — skip and go back.",
+            extra={"color": f"{Fore.CYAN}"},
+        )
+    else:
+        logger.info("PM to this user have been limited.")
+    _leave_pm_screen(device, universal_actions)
+
+
+def _leave_pm_screen(device, universal_actions) -> None:
+    """Back out of a DM thread / restriction screen to the profile."""
+    try:
+        universal_actions.close_keyboard(device)
+    except Exception:
+        pass
+    device.back()
+    random_sleep(0.3, 0.6, modulable=False, log=False)
 
 
 def can_like(session_state: SessionState, likes_percentage: int) -> bool:
@@ -940,22 +1151,80 @@ def _send_PM(
 ) -> bool:
     universal_actions = UniversalActions(device)
     if private:
-        options = device.find(
-            classNameMatches=ClassName.FRAME_LAYOUT,
-            descriptionMatches=case_insensitive_re("^Options$"),
+        # Private profiles: ⋮ (top-right Options) → "Send message"
+        logger.info(
+            "Private profile — opening ⋮ Options, then Send message.",
+            extra={"color": f"{Fore.CYAN}"},
         )
-        if options.exists(Timeout.SHORT):
-            options.click()
-        else:
+        random_sleep(0.4, 0.8, modulable=False, log=False)
+        options = None
+        options_candidates = [
+            device.find(
+                resourceIdMatches=case_insensitive_re(
+                    ResourceID.ACTION_BAR_OVERFLOW_ICON
+                )
+            ),
+            device.find(
+                descriptionMatches=case_insensitive_re(
+                    "^(Options|More options|More Options|Overflow)$"
+                )
+            ),
+            device.find(
+                classNameMatches=ClassName.BUTTON_OR_FRAME_LAYOUT_REGEX,
+                descriptionMatches=case_insensitive_re(
+                    "^(Options|More options|More Options)$"
+                ),
+            ),
+            device.find(
+                classNameMatches=ClassName.IMAGE_VIEW,
+                descriptionMatches=case_insensitive_re(
+                    "^(Options|More options|More Options)$"
+                ),
+            ),
+        ]
+        for candidate in options_candidates:
+            try:
+                if candidate is not None and candidate.exists(Timeout.SHORT):
+                    options = candidate
+                    break
+            except Exception:
+                continue
+        if options is None:
+            logger.warning(
+                "Cannot find ⋮ Options on private profile — cannot open Send message."
+            )
             return False
-        send_pm = device.find(
-            classNameMatches=ClassName.BUTTON,
-            textMatches=case_insensitive_re("^Send Message$"),
-        )
-        if send_pm.exists(Timeout.SHORT):
-            send_pm.click()
-        else:
+        options.click()
+        random_sleep(0.6, 1.1, modulable=False, log=False)
+
+        send_pm = None
+        send_candidates = [
+            device.find(
+                classNameMatches=ClassName.BUTTON_OR_TEXTVIEW_REGEX,
+                textMatches=case_insensitive_re("^Send [Mm]essage$"),
+            ),
+            device.find(
+                textMatches=case_insensitive_re("^Send [Mm]essage$"),
+            ),
+            device.find(
+                descriptionMatches=case_insensitive_re("^Send [Mm]essage$"),
+            ),
+        ]
+        for candidate in send_candidates:
+            try:
+                if candidate is not None and candidate.exists(Timeout.SHORT):
+                    send_pm = candidate
+                    break
+            except Exception:
+                continue
+        if send_pm is None:
+            logger.warning(
+                "Options menu opened but 'Send message' was not found."
+            )
+            device.back()
             return False
+        send_pm.click()
+        random_sleep(0.8, 1.4, modulable=False, log=False)
     else:
         coordinator_layout = device.find(resourceId=ResourceID.COORDINATOR_ROOT_LAYOUT)
         if coordinator_layout.exists() and swipe_amount != 0:
@@ -972,20 +1241,42 @@ def _send_PM(
         else:
             logger.warning("Cannot find the button for sending PMs!")
             return False
+        random_sleep(0.6, 1.1, modulable=False, log=False)
+
+    # Restriction screen — soft (recipient) vs hard (Community Standards)
+    block_kind = _pm_block_kind(device)
+    if block_kind:
+        _handle_pm_restriction(
+            device, universal_actions, session_state, my_username, kind=block_kind
+        )
+        return False
+
     message_box = device.find(
         resourceId=ResourceID.ROW_THREAD_COMPOSER_EDITTEXT,
         className=ClassName.EDIT_TEXT,
         enabled="true",
     )
 
-    if message_box.exists():
+    if message_box.exists(Timeout.SHORT):
+        message_box.click()
+        random_sleep(0.3, 0.5, modulable=False, log=False)
+        try:
+            device.deviceV2.clear_text()
+        except Exception:
+            pass
         message = load_random_message(my_username)
         if message is None:
             logger.warning(
                 "If you don't want to comment set 'pm-percentage: 0' in your config.yml."
             )
-            device.back()
+            _leave_pm_screen(device, universal_actions)
             return False
+        try:
+            from GramAddict.core.follow_vision_account import _normalize_cold_dm_text
+
+            message = _normalize_cold_dm_text(message, casual=True)
+        except Exception:
+            message = (message or "").strip()
         nl = "\n"
         nlv = "\\n"
         logger.info(
@@ -1000,6 +1291,17 @@ def _send_PM(
             send_button.click()
             universal_actions.detect_block(device)
             universal_actions.close_keyboard(device)
+            # After send, IG may still show Community Standards instead of the bubble.
+            post_kind = _pm_block_kind(device)
+            if post_kind in ("hard", "request_limit"):
+                _handle_pm_restriction(
+                    device,
+                    universal_actions,
+                    session_state,
+                    my_username,
+                    kind=post_kind,
+                )
+                return False
             posted_text = device.find(text=f"{message}")
             message_sending_icon = device.find(
                 resourceId=ResourceID.ACTION_ICON, className=ClassName.IMAGE_VIEW
@@ -1008,24 +1310,33 @@ def _send_PM(
                 random_sleep()
             if posted_text.exists(Timeout.MEDIUM) and not message_sending_icon.exists():
                 logger.info("PM send succeed.", extra={"color": f"{Fore.GREEN}"})
-                session_state.totalPm += 1
+                try:
+                    session_state.register_pm()
+                except Exception:
+                    session_state.totalPm = int(getattr(session_state, "totalPm", 0) or 0) + 1
                 pm_confirmed = True
             else:
-                logger.warning("Failed to check if PM send succeed.")
-                pm_confirmed = False
+                # Send was tapped; IG sometimes hides the bubble from UI dump.
+                # Still count so Farm / session totals match reality.
+                logger.warning(
+                    "PM send clicked but bubble not confirmed in UI — counting as sent."
+                )
+                try:
+                    session_state.register_pm()
+                except Exception:
+                    session_state.totalPm = int(getattr(session_state, "totalPm", 0) or 0) + 1
+                pm_confirmed = True
             logger.info("Go back to profile view.")
             device.back()
             return pm_confirmed
         else:
             logger.warning("Can't find SEND button!")
-            universal_actions.close_keyboard(device)
-            device.back()
+            _leave_pm_screen(device, universal_actions)
             return False
-    else:
-        logger.info("PM to this user have been limited.")
-        universal_actions.close_keyboard(device)
-        device.back()
-        return False
+
+    # No composer — soft skip or hard Community Standards.
+    _handle_pm_restriction(device, universal_actions, session_state, my_username)
+    return False
 
 
 def _load_and_clean_txt_file(
@@ -1056,6 +1367,23 @@ def _load_and_clean_txt_file(
 
 
 def load_random_message(my_username: str) -> Optional[str]:
+    try:
+        from GramAddict.core.follow_vision_account import (
+            ai_pms_enabled,
+            generate_ai_pm,
+        )
+
+        if ai_pms_enabled(my_username):
+            message = generate_ai_pm(my_username)
+            if message:
+                logger.debug(
+                    "Using AI-generated DM (ai-pm-enabled in follow_vision.yml)."
+                )
+                return emoji.emojize(message, use_aliases=True)
+    except Exception as exc:
+        logger.warning(
+            f"AI DM generation failed ({exc}); falling back to pm_list.txt."
+        )
     lines = _load_and_clean_txt_file(my_username, storage.FILENAME_MESSAGES)
     if lines is not None:
         random_message = choice(lines)

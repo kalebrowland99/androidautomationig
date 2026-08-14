@@ -423,6 +423,48 @@ def start_bot(**kwargs):
         storage = Storage(session_state.my_username, brand_pool=brand_pool)
         session_state.storage = storage
         filters = Filter(storage)
+
+        # Before any jobs: reply to unreplied DMs (wedding lead conversations).
+        try:
+            from GramAddict.core.dm_inbox_reply import run_dm_inbox_replies
+
+            run_dm_inbox_replies(
+                device,
+                session_state,
+                session_state.my_username,
+                profile_filter=filters,
+            )
+            write_live_progress(
+                session_state.my_username,
+                session_state,
+                running=True,
+                current_job="dm-inbox-reply",
+            )
+        except Exception as dm_exc:
+            logger.warning("DM inbox reply pass failed (continuing): %s", dm_exc)
+
+        # Follow-backs who never got a cold DM (PM cap → follow, they follow back).
+        try:
+            from GramAddict.core.dm_new_followers import run_dm_new_followers
+
+            run_dm_new_followers(
+                device,
+                session_state,
+                session_state.my_username,
+                profile_filter=filters,
+                brand_pool=brand_pool,
+            )
+            write_live_progress(
+                session_state.my_username,
+                session_state,
+                running=True,
+                current_job="dm-new-followers",
+            )
+        except Exception as followback_exc:
+            logger.warning(
+                "Follow-back DM pass failed (continuing): %s", followback_exc
+            )
+
         show_ending_conditions()
         if not configs.args.debug:
             countdown(10, "Bot will start in: ")

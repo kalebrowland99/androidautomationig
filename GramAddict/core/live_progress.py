@@ -75,8 +75,24 @@ def write_live_progress(
             "follows": getattr(session_state.args, "current_follow_limit", None),
             "watches": getattr(session_state.args, "current_watch_limit", None),
             "comments": getattr(session_state.args, "current_comments_limit", None),
+            "pm": getattr(session_state.args, "current_pm_limit", None),
         },
     }
+    # Surface 24h Community Standards smart PM cap on Farm.
+    try:
+        from GramAddict.core.dm_limit_history import (
+            active_dm_limit_until,
+            active_smart_pm_cap,
+        )
+
+        smart_cap = active_smart_pm_cap(username)
+        payload["smart_pm_cap"] = smart_cap
+        payload["dm_limited"] = smart_cap is not None
+        payload["dm_limit_until"] = active_dm_limit_until(username)
+    except Exception:
+        payload["smart_pm_cap"] = None
+        payload["dm_limited"] = False
+        payload["dm_limit_until"] = None
     try:
         from GramAddict.core.day_stats import daily_goals_from_args, today_action_totals
 
@@ -87,6 +103,7 @@ def write_live_progress(
             "story_likes": today["story_likes"],
             "story_accounts_liked": today["story_accounts_liked"],
             "follows": today["follows"],
+            "pm": today.get("pm", 0),
             "likes_goal": goals["likes"],
             "story_likes_goal": goals["stories"],
             "follows_goal": goals["follows"],

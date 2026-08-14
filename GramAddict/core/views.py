@@ -183,7 +183,7 @@ class TabBarView:
             button = self.device.find(
                 classNameMatches=ClassName.BUTTON_OR_FRAME_LAYOUT_REGEX,
                 descriptionMatches=case_insensitive_re(
-                    TabBarText.ACTIVITY_CONTENT_DESC
+                    r"^(Activity|Notifications|News)(,.+)?$"
                 ),
             )
         elif tab == TabBarTabs.PROFILE:
@@ -264,6 +264,71 @@ class HomeView(ActionBarView):
         search_btn.click()
 
         return SearchView(self.device)
+
+    def navigateToInbox(self) -> bool:
+        """Open Instagram Direct inbox from the home action bar.
+
+        Returns True if a likely inbox control was tapped (or inbox already open).
+        """
+        if self.is_inbox_open():
+            logger.debug("Direct inbox already open.")
+            return True
+
+        logger.debug("Navigate to Direct inbox")
+        # Prefer action-bar child (paper plane), then any matching desc on screen.
+        candidates = [
+            self.action_bar.child(
+                descriptionMatches=case_insensitive_re(
+                    TabBarText.DIRECT_INBOX_CONTENT_DESC
+                )
+            ),
+            self.device.find(
+                descriptionMatches=case_insensitive_re(
+                    TabBarText.DIRECT_INBOX_CONTENT_DESC
+                )
+            ),
+            self.device.find(
+                resourceIdMatches=case_insensitive_re(
+                    f".*:id/(action_bar_inbox_button|inbox_directory|direct_tab)"
+                )
+            ),
+        ]
+        for btn in candidates:
+            try:
+                if btn is not None and btn.exists(Timeout.SHORT):
+                    btn.click()
+                    random_sleep(0.8, 1.4, modulable=False, log=False)
+                    return True
+            except Exception as exc:
+                logger.debug("Inbox tap candidate failed: %s", exc)
+        return False
+
+    def is_inbox_open(self) -> bool:
+        """Best-effort check that the Direct inbox thread list is showing."""
+        checks = [
+            self.device.find(
+                resourceIdMatches=case_insensitive_re(
+                    f".*:id/(direct_inbox|inbox_directory|row_inbox_search|"
+                    f"direct_empty_view|thread_title|inbox_refreshable_thread_list)"
+                )
+            ),
+            self.device.find(
+                classNameMatches=ClassName.BUTTON_OR_TEXTVIEW_REGEX,
+                textMatches=case_insensitive_re("^(Messages|Message requests|Primary|General)$"),
+            ),
+            self.device.find(
+                descriptionMatches=case_insensitive_re(
+                    "^(Messages|Message requests|New message)$"
+                )
+            ),
+        ]
+        for view in checks:
+            try:
+                if view is not None and view.exists(Timeout.TINY):
+                    return True
+            except Exception:
+                continue
+        return False
 
 
 class HashTagView:
@@ -3567,6 +3632,100 @@ class PostsGridView:
         """True when the profile grid cell at (row, col) is on screen and clickable."""
         return self._grid_cell(row, col).exists(Timeout.ZERO)
 
+    def _thumbnail_for_visual_row(self, visual_row: int, col: int = 1):
+        """Thumbnail for Instagram's 1-based grid row/column (content-desc, else index)."""
+        desc = self.find_post_by_grid_position(visual_row, col)
+        if desc.exists(Timeout.ZERO):
+            return desc
+        return self._grid_cell(visual_row - 1, col - 1)
+
+    def _cell_fully_on_screen(self, cell, min_height: int = 120) -> bool:
+        """True when a grid thumbnail is tall enough and not clipped by the tab bar."""
+        if cell is None or not cell.exists(Timeout.ZERO):
+            return False
+        try:
+            bounds = cell.get_bounds()
+        except Exception:
+            return False
+        top = int(bounds.get("top") or 0)
+        bottom = int(bounds.get("bottom") or 0)
+        height = bottom - top
+        if height < min_height:
+            return False
+        try:
+            screen_h = int(self.device.get_info().get("displayHeight") or 2000)
+        except Exception:
+            screen_h = 2000
+        if bottom > int(screen_h * 0.90):
+            return False
+        if top < 80:
+            return False
+        return True
+
+    def scroll_grid(self, delta_y: Optional[int] = None) -> None:
+        """Flick the profile grid without a long-press on a thumbnail.
+
+        Starts on the gutter between columns 1 and 2 (not a cell center) and
+        uses a short duration so Instagram does not treat it as a hold.
+        """
+        info = self.device.get_info()
+        width = int(info.get("displayWidth") or 1080)
+        height = int(info.get("displayHeight") or 2000)
+        start_x = int(width / 3)
+        start_y = int(height * 0.52)
+        cell = self.find_post_by_grid_position(1, 1)
+        if cell.exists(Timeout.ZERO):
+            try:
+                top = int(cell.get_bounds().get("top") or 0)
+                if 180 < top < int(height * 0.75):
+                    start_y = max(top - 50, int(height * 0.28))
+            except Exception:
+                pass
+        travel = int(delta_y) if delta_y else randint(420, 560)
+        end_y = max(start_y - travel, int(height * 0.16))
+        self.device.swipe_points(
+            start_x,
+            start_y,
+            start_x,
+            end_y,
+            random_x=False,
+            random_y=False,
+            duration=uniform(0.07, 0.12),
+        )
+
+    def ensure_grid_rows_visible(self, rows: int = 2, min_cell_height: int = 120) -> bool:
+        """Scroll the profile until the first ``rows`` grid rows are fully on screen."""
+        if not self.is_post_tappable(0, 0):
+            ProfileView(self.device).swipe_to_fit_posts()
+            random_sleep(0.4, 0.8, modulable=False)
+
+        last_row = max(1, int(rows))
+        for attempt in range(6):
+            visible = True
+            for visual_row in range(1, last_row + 1):
+                cell = self._thumbnail_for_visual_row(visual_row, 1)
+                if not self._cell_fully_on_screen(cell, min_cell_height):
+                    visible = False
+                    break
+            if visible:
+                if attempt:
+                    logger.info(
+                        f"Profile grid rows 1–{last_row} on screen after {attempt} scroll(s).",
+                        extra={"color": f"{Fore.CYAN}"},
+                    )
+                return True
+            logger.info(
+                f"Scrolling profile to reveal grid row {last_row} ({attempt + 1}/6).",
+                extra={"color": f"{Fore.CYAN}"},
+            )
+            self.scroll_grid()
+            random_sleep(0.45, 0.85, modulable=False)
+
+        ok = self.is_post_tappable(last_row - 1, 0)
+        if not ok:
+            logger.warning(f"Could not fully reveal profile grid row {last_row}.")
+        return ok
+
     def is_cell_pinned(self, row: int, col: int) -> bool:
         """Best-effort pin badge detection (Instagram often omits it from the a11y tree)."""
         cell = self._grid_cell(row, col)
@@ -3630,10 +3789,39 @@ class PostsGridView:
         ``row``/``col`` are 1-based to match Instagram's own numbering.
         """
         pattern = case_insensitive_re(rf".*\bat row {row}, column {col}\b.*")
-        return self.device.find(
+        views = self.device.find(
             resourceIdMatches=ResourceID.IMAGE_BUTTON,
             descriptionMatches=pattern,
         )
+        # Collab/pin badges are also image_buttons on the same cell. Prefer the
+        # largest match so we tap the thumbnail, not the overlay.
+        try:
+            count = views.count_items() if views.exists(Timeout.ZERO) else 0
+        except Exception:
+            count = 1
+        if count <= 1:
+            return views
+        best = views
+        best_area = 0
+        for index in range(count):
+            candidate = self.device.find(
+                resourceIdMatches=ResourceID.IMAGE_BUTTON,
+                descriptionMatches=pattern,
+                index=index,
+            )
+            if not candidate.exists(Timeout.ZERO):
+                continue
+            try:
+                bounds = candidate.get_bounds()
+                area = (bounds["right"] - bounds["left"]) * (
+                    bounds["bottom"] - bounds["top"]
+                )
+            except Exception:
+                continue
+            if area > best_area:
+                best_area = area
+                best = candidate
+        return best
 
     def _ensure_grid_cell_tappable(self, post_view) -> bool:
         """Scroll the profile grid until ``post_view`` has a tappable height.
@@ -3652,9 +3840,7 @@ class PostsGridView:
             f"Grid cell only {height}px tall — scrolling to bring it fully on screen."
         )
         for _ in range(3):
-            UniversalActions(self.device)._swipe_points(
-                direction=Direction.DOWN, delta_y=randint(280, 380)
-            )
+            self.scroll_grid(delta_y=randint(320, 420))
             random_sleep(0.4, 0.8, modulable=False)
             if not post_view.exists(Timeout.SHORT):
                 return False
@@ -3688,7 +3874,7 @@ class PostsGridView:
             post_view = self.find_post_by_grid_position(row, col)
             if not post_view.exists(Timeout.SHORT):
                 return None, None, None
-        post_view.click()
+        post_view.click(mode=Location.CENTER)
         random_sleep(0.4, 0.8, modulable=False)
         if not self._post_view_opened():
             logger.debug(
@@ -3714,7 +3900,7 @@ class PostsGridView:
         post_view = row_view.child(index=col)
         if not post_view.exists():
             return None, None, None
-        post_view.click()
+        post_view.click(mode=Location.CENTER)
         random_sleep(0.4, 0.8, modulable=False)
         if not self._post_view_opened():
             logger.debug(

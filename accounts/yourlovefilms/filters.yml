@@ -5,8 +5,8 @@ skip_non_business: false
 skip_following: false
 skip_follower: false
 skip_if_link_in_bio: false
-follow_private_or_empty: false
-min_followers: 50
+follow_private_or_empty: true
+min_followers: 0
 max_followers: 30000
 min_followings: 50
 min_potency_ratio: 0.5
@@ -31,28 +31,40 @@ comment_feed: false
 comment_photos: true
 comment_videos: true
 comment_carousels: true
-pm_to_private_or_empty: false
+pm_to_private_or_empty: true
 min_likers: 1
 max_likers: 2000
 max_followings: 8000
 ignore_following_count: true
 ignore_potency: true
-blacklist_words_name: [nashville, photo, photos, photograher, videographer, film, films, venue, wedding]
-# Skip story likes when @handle or display name contains these (substring match,
-# including inside compound usernames like texaphotossleep / lrow.photography).
+blacklist_words_name:
+- nashville
+- photo
+- photos
+- photograher
+- videographer
+- film
+- films
+- venue
+- wedding
+- photography
+- videography
+- video
+- bridal
 skip_story_like:
-  - photo
-  - photos
-  - photography
-  - film
-  - films
-  - event
-  - events
-  - create
-  - creates
-  - moment
-  - moments
-  - flower
-  - flowers
-  - floral
-  - florals
+- photo
+- photos
+- photography
+- film
+- films
+- event
+- events
+- create
+- creates
+- moment
+- moments
+- flower
+- flowers
+- floral
+- florals
+pm_private_only: true
